@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MediCare Firebase</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#5b5ce2">
+</head>
+<body>
+
+<div id="authPage" class="auth-page">
+    <div class="auth-card">
+        <h1>💊 MediCare</h1>
+        <p>Smart medicine reminder with Firebase</p>
+
+        <input type="text" id="signupName" placeholder="Full Name">
+        <input type="email" id="authEmail" placeholder="Email">
+        <input type="password" id="authPassword" placeholder="Password">
+
+        <button onclick="signup()">Create Account</button>
+        <button class="secondary-btn" onclick="login()">Login</button>
+
+        <p id="authMessage"></p>
+    </div>
+</div>
+
+<div id="appPage" class="app hidden">
+
+    <aside class="sidebar">
+        <div class="logo">💊 <span>MediCare</span></div>
+
+        <ul>
+            <li onclick="showPage('dashboardPage')">🏠 Dashboard</li>
+            <li onclick="showPage('familyPage')">👨‍👩‍👧 Family</li>
+            <li onclick="showPage('medicinePage')">💊 Medicines</li>
+            <li onclick="showPage('appointmentPage')">📅 Appointments</li>
+            <li onclick="showPage('doctorPage')">🏥 Doctors</li>
+            <li onclick="showPage('analyticsPage')">📊 Analytics</li>
+            <li onclick="showPage('caregiverPage')">👨‍⚕ Caregiver</li>
+            <li onclick="showPage('healthPage')">🩺 Health Tools</li>
+            <li onclick="showPage('aiPage')">🤖 AI Assistant</li>
+            <li onclick="showPage('historyPage')">📜 History</li>
+        </ul>
+
+        <button class="logout-btn" onclick="logout()">Logout</button>
+    </aside>
+
+    <main class="main-content">
+
+        <section id="dashboardPage" class="page-section">
+            <section id="dashboardSection" class="hero">
+                <h1 id="welcomeText">Welcome 👋</h1>
+                <p>Your Firebase connected medicine dashboard</p>
+                <p><b>Caregiver Code:</b> <span id="caregiverCodeText">---</span></p>
+            </section>
+
+            <section class="stats-container">
+                <div class="stat-card"><h3>Total Medicines</h3><p id="totalMedicines">0</p></div>
+                <div class="stat-card"><h3>Taken</h3><p id="takenMedicines">0</p></div>
+                <div class="stat-card"><h3>Pending</h3><p id="pendingMedicines">0</p></div>
+                <div class="stat-card"><h3>Missed</h3><p id="missedMedicines">0</p></div>
+                <div class="stat-card"><h3>⏰ Next Dose</h3><p id="nextDoseText">---</p></div>
+                <div class="stat-card"><h3>👨‍👩‍👧 Family</h3><p id="familyCount">0</p></div>
+            </section>
+
+            <section class="panel">
+                <h2>📊 Today's Progress</h2>
+                <div class="progress-box"><div id="progressFill"></div></div>
+                <p id="progressText">0% completed</p>
+            </section>
+
+            <section class="panel">
+                <h2>📈 Weekly Chart</h2>
+                <canvas id="weeklyChart" width="600" height="250"></canvas>
+            </section>
+
+            <section class="panel">
+                <h2>📄 Health Report</h2>
+                <p>Download medicines, appointments, prescriptions and progress report.</p>
+                <button onclick="downloadHealthReport()">Download Health Report</button>
+            </section>
+        </section>
+
+        <section id="familyPage" class="page-section hidden">
+            <section id="familySection" class="panel">
+                <h2>👨‍👩‍👧 Family Members</h2>
+
+                <input type="text" id="familyMemberName" placeholder="Family member name">
+                <input type="text" id="familyMemberRelation" placeholder="Relation e.g. Mother, Father, Grandmother">
+
+                <button onclick="addFamilyMember()">+ Add Family Member</button>
+
+                <h2 class="mt">🔍 Search Family Member</h2>
+                <input type="text" id="familySearch" placeholder="Search family member..." oninput="displayFamilyMembers()">
+
+                <h2 class="mt">Saved Members</h2>
+                <div id="familyMemberList"></div>
+            </section>
+        </section>
+
+        <section id="medicinePage" class="page-section hidden">
+            <section id="medicineSection" class="panel">
+                <h2>💊 Add / Edit Medicine</h2>
+                <section class="panel voice-panel">
+    <h2>🎤 Voice Assistant</h2>
+    <p>Say: "Add Dolo 650 at 8 PM"</p>
+
+    <button onclick="startVoiceAssistant()">
+        🎤 Start Voice Input
+    </button>
+
+    <p id="voiceText">Voice command will appear here...</p>
+</section>
+                <input type="hidden" id="editMedicineId">
+
+                <select id="medicineFamilyMember">
+                    <option value="">👤 Self</option>
+                </select>
+
+                <input type="text" id="medicineName" placeholder="Medicine Name">
+
+                <select id="medicineCategory">
+                    <option value="">Select Category</option>
+                    <option value="Tablet">Tablet</option>
+                    <option value="Syrup">Syrup</option>
+                    <option value="Injection">Injection</option>
+                    <option value="Drops">Drops</option>
+                </select>
+
+                <input type="number" id="medicineStock" placeholder="Stock Count">
+                <input type="date" id="medicineExpiry">
+
+                <div id="timeInputs">
+                    <input type="time" class="medicineTime">
+                </div>
+
+                <label class="repeat-box">
+                    <input type="checkbox" id="repeatDaily">
+                    Repeat Daily
+                </label>
+
+                <button onclick="addTimeField()">+ Add Time</button>
+                <button onclick="addMedicine()">+ Save Medicine</button>
+
+                <h2 class="mt">🔍 Filter Medicines</h2>
+
+                <select id="medicineFilterMember" onchange="displayMedicines()">
+                    <option value="">All Members</option>
+                </select>
+
+                <div class="search-box">
+                    <input
+                        type="text"
+                        id="searchMedicine"
+                        placeholder="Search by medicine name, category, family member..."
+                        oninput="displayMedicines()"
+                    >
+                </div>
+
+                <h2 class="mt">📋 Medicine List</h2>
+                <div id="medicineList"></div>
+            </section>
+        </section>
+
+        <section id="appointmentPage" class="page-section hidden">
+            <section id="appointmentSection" class="panel">
+                <h2>📅 Doctor Appointment</h2>
+
+                <input type="text" id="doctorName" placeholder="Doctor Name">
+                <input type="text" id="hospitalName" placeholder="Hospital Name">
+                <input type="date" id="appointmentDate">
+                <input type="time" id="appointmentTime">
+                <textarea id="appointmentNotes" placeholder="Notes"></textarea>
+
+                <button onclick="addAppointment()">+ Add Appointment</button>
+
+                <h2 class="mt">Upcoming Appointments</h2>
+                <div id="appointmentList"></div>
+            </section>
+        </section>
+
+        <section id="doctorPage" class="page-section hidden">
+            <section id="doctorSection" class="panel">
+                <h2>🏥 Doctor Management</h2>
+
+                <input type="text" id="doctorManageName" placeholder="Doctor Name">
+                <input type="text" id="doctorSpecialization" placeholder="Specialization">
+                <input type="tel" id="doctorContact" placeholder="Contact Number">
+                <input type="text" id="doctorHospital" placeholder="Hospital">
+
+                <button onclick="addDoctor()">+ Add Doctor</button>
+
+                <h2 class="mt">Saved Doctors</h2>
+                <div id="doctorList"></div>
+            </section>
+        </section>
+
+        <section id="analyticsPage" class="page-section hidden">
+            <section id="analyticsSection" class="panel">
+                <h2>📊 Analytics Dashboard</h2>
+
+                <div class="stats-container">
+                    <div class="stat-card">
+                        <h3>Medicine Adherence</h3>
+                        <p id="adherencePercent">0%</p>
+                    </div>
+
+                    <div class="stat-card">
+                        <h3>Missed Doses</h3>
+                        <p id="missedThisWeek">0</p>
+                    </div>
+
+                    <div class="stat-card">
+                        <h3>Appointments</h3>
+                        <p id="appointmentCount">0</p>
+                    </div>
+
+                    <div class="stat-card">
+                        <h3>Doctors</h3>
+                        <p id="doctorCount">0</p>
+                    </div>
+                </div>
+
+                <h2 class="mt">Family Member Statistics</h2>
+                <div id="familyStatsBox"></div>
+            </section>
+        </section>
+
+        <section id="caregiverPage" class="page-section hidden">
+            <section class="panel">
+                <h2>🚨 Emergency Contact</h2>
+
+                <input type="text" id="emergencyName" placeholder="Contact Name">
+                <input type="tel" id="emergencyPhone" placeholder="Phone Number">
+
+                <button onclick="saveEmergencyContact()">Save Emergency Contact</button>
+
+                <div id="emergencyContactBox"></div>
+            </section>
+
+            <section class="panel">
+                <h2>🚨 Emergency SOS</h2>
+                <button onclick="triggerSOS()">🚨 SEND EMERGENCY ALERT</button>
+                <div id="sosStatus"></div>
+            </section>
+
+            <section id="caregiverSection" class="panel">
+                <h2>👨‍⚕ Caregiver View</h2>
+
+                <p>Your caregiver can use this code:</p>
+                <div class="code-box" id="myCaregiverCode">---</div>
+
+                <input type="text" id="caregiverSearchCode" placeholder="Enter patient caregiver code">
+                <button onclick="loadCaregiverView()">View Patient Data</button>
+
+                <div id="caregiverData"></div>
+            </section>
+
+            <section id="alertsSection" class="panel">
+                <h2>⚠ Caregiver Alerts</h2>
+                <div id="caregiverAlertList"></div>
+            </section>
+        </section>
+
+        <section id="healthPage" class="page-section hidden">
+            <section class="panel">
+                <h2>💧 Water Reminder</h2>
+                <p>Reminds you to drink water every hour.</p>
+                <button onclick="startWaterReminder()">Start Water Reminder</button>
+                <button onclick="stopWaterReminder()">Stop Water Reminder</button>
+            </section>
+
+            <section class="panel">
+                <h2>⚖ BMI Calculator</h2>
+                <input type="number" id="heightInput" placeholder="Height in cm">
+                <input type="number" id="weightInput" placeholder="Weight in kg">
+                <button onclick="calculateBMI()">Calculate BMI</button>
+                <p id="bmiResult"></p>
+            </section>
+
+            <section id="prescriptionSection" class="panel">
+                <h2>📄 Prescription Records</h2>
+
+                <input type="text" id="prescriptionDoctor" placeholder="Doctor Name">
+                <input type="text" id="prescriptionMedicine" placeholder="Medicine / Prescription Name">
+                <input type="date" id="prescriptionDate">
+                <textarea id="prescriptionNotes" placeholder="Prescription notes"></textarea>
+
+                <button onclick="addPrescriptionRecord()">+ Add Prescription Record</button>
+
+                <h2 class="mt">Saved Prescriptions</h2>
+                <div id="prescriptionList"></div>
+            </section>
+
+            <section class="panel">
+                <h2>💡 Daily Health Tip</h2>
+                <div id="healthTip">Drink enough water and take medicines on time.</div>
+            </section>
+        </section>
+
+        <section id="aiPage" class="page-section hidden">
+            <section id="aiSection" class="panel">
+                <h2>🤖 Real AI Health Assistant</h2>
+
+                <div class="code-box" style="margin-bottom: 25px; background: #eef2ff; border: 1px solid #dfe3ff; text-align: left;">
+                    <label for="geminiInput" style="display:block; font-size:14px; margin-bottom:8px; color:#374151;"><b>🔑 Google Gemini API Key</b> (Stored securely in your browser)</label>
+                    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                        <input type="password" id="geminiInput" placeholder="Enter your Gemini API Key (AIza...)" style="margin-bottom:0; flex:1; min-width:200px;">
+                        <button onclick="saveGeminiKey()" style="width:auto; margin-bottom:0; padding:12px 24px;">Save Key</button>
+                    </div>
+                    <p style="font-size:12px; color:#6b7280; margin-top:10px; margin-bottom:0;">Don't have a key? <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:#5b5ce2; font-weight:bold; text-decoration:none;">Get a free API key from Google AI Studio →</a></p>
+                </div>
+
+                <input type="text" id="aiQuestion" placeholder="Ask a health question...">
+                <button onclick="askHealthAI()">Ask AI</button>
+
+                <div id="aiAnswer"></div>
+            </section>
+        </section>
+
+        <section id="historyPage" class="page-section hidden">
+            <section class="panel">
+                <h2>🔔 Notification Center</h2>
+                <div id="notificationCenter"></div>
+            </section>
+
+            <section id="historySection" class="panel">
+                <h2>📜 History</h2>
+                <div id="historyList"></div>
+            </section>
+
+            <button onclick="toggleTheme()">🌙 Toggle Theme</button>
+
+            <footer class="panel">
+                <center>
+                    💊 MediCare Reminder System
+                    <br>
+                    Made with Firebase ❤️
+                </center>
+            </footer>
+        </section>
+
+    </main>
+</div>
+
+<script type="module" src="script.js"></script>
+</body>
+</html>
