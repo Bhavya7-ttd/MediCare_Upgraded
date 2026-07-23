@@ -12,7 +12,7 @@
     <link rel="manifest" href="manifest.json">
     <meta name="theme-color" content="#5b5ce2">
 </head>
-<body>
+<body class="pre-auth">
 
 <div id="authPage" class="auth-page">
     <div class="auth-card">
@@ -25,12 +25,18 @@
 
         <button onclick="signup()">Create Account</button>
         <button class="secondary-btn" onclick="login()">Login</button>
+        <button class="secondary-btn" onclick="forgotPassword()">
+        Forgot Password?
+        </button>
+        <p style="font-size:13px;color:#6b7280;text-align:center;">
+        ⚠ Please verify your email before logging in.
+        </p>
 
         <p id="authMessage"></p>
     </div>
 </div>
 
-<div id="appPage" class="app hidden">
+<div id="appPage" class="app hidden" inert aria-hidden="true">
 
     <aside class="sidebar">
         <div class="logo">💊 <span>MediCare</span></div>
@@ -55,13 +61,51 @@
 
         <section id="dashboardPage" class="page-section">
             <section id="dashboardSection" class="hero">
-                <h1 id="welcomeText">Welcome 👋</h1>
-                <p>Your Firebase connected medicine dashboard</p>
-                <p><b>Caregiver Code:</b> <span id="caregiverCodeText">---</span></p>
-            </section>
+
+    <div class="hero-left">
+
+        <h1 id="welcomeText">
+            👋 Welcome Back
+        </h1>
+
+        <p class="hero-subtitle">
+            Stay healthy by keeping track of medicines,
+            appointments and daily health activities.
+        </p>
+
+        <div class="caregiver-card">
+            <span>🔐 Caregiver Code</span>
+            <h3 id="caregiverCodeText">---</h3>
+        </div>
+
+    </div>
+
+    <div class="hero-right">
+
+        <img
+        src="https://cdn-icons-png.flaticon.com/512/2966/2966489.png"
+        class="hero-image">
+
+    </div>
+
+</section>
 
             <section class="stats-container">
-                <div class="stat-card"><h3>Total Medicines</h3><p id="totalMedicines">0</p></div>
+                <div class="stat-card">
+<h3>Today's Adherence</h3>
+<p id="todayAdherence">0%</p>
+</div>
+
+<div class="stat-card">
+<h3>Health Score</h3>
+<p id="healthScore">100</p>
+</div>
+
+<div class="stat-card">
+<h3>Upcoming Appointment</h3>
+<p id="nextAppointment">None</p>
+</div>
+                <div class="stat-card"><h3>💊Total Medicines</h3><p id="totalMedicines">0</p></div>
                 <div class="stat-card"><h3>Taken</h3><p id="takenMedicines">0</p></div>
                 <div class="stat-card"><h3>Pending</h3><p id="pendingMedicines">0</p></div>
                 <div class="stat-card"><h3>Missed</h3><p id="missedMedicines">0</p></div>
@@ -70,21 +114,42 @@
             </section>
 
             <section class="panel">
-                <h2>📊 Today's Progress</h2>
+                <h2>
+                📊 Today's Medication Progress
+                </h2>
+
+                <p class="section-subtitle">
+                Complete today's medicines to improve your health score.
+                </p>
                 <div class="progress-box"><div id="progressFill"></div></div>
                 <p id="progressText">0% completed</p>
             </section>
 
             <section class="panel">
-                <h2>📈 Weekly Chart</h2>
+                <h2>
+📈 Weekly Medication Analytics
+</h2>
+
+<p class="section-subtitle">
+View your medicine adherence throughout the week.
+</p>
                 <canvas id="weeklyChart" width="600" height="250"></canvas>
             </section>
 
             <section class="panel">
-                <h2>📄 Health Report</h2>
-                <p>Download medicines, appointments, prescriptions and progress report.</p>
-                <button onclick="downloadHealthReport()">Download Health Report</button>
-            </section>
+
+            <h2>📄 Health Report</h2>
+
+            <p class="section-subtitle">
+                Generate a comprehensive health report including medicines,
+                appointments, doctors, prescriptions, and medication history.
+            </p>
+
+            <button onclick="downloadHealthReport()">
+                📥 Download Health Report
+            </button>
+
+        </section>
         </section>
 
         <section id="familyPage" class="page-section hidden">
@@ -197,40 +262,52 @@
                 <button onclick="addDoctor()">+ Add Doctor</button>
 
                 <h2 class="mt">Saved Doctors</h2>
+                <input
+                type="text"
+                id="doctorSearch"
+                placeholder="Search Doctor..."
+                oninput="displayDoctors()">
                 <div id="doctorList"></div>
             </section>
         </section>
 
         <section id="analyticsPage" class="page-section hidden">
-            <section id="analyticsSection" class="panel">
-                <h2>📊 Analytics Dashboard</h2>
 
-                <div class="stats-container">
-                    <div class="stat-card">
-                        <h3>Medicine Adherence</h3>
-                        <p id="adherencePercent">0%</p>
-                    </div>
+    <section id="analyticsSection" class="panel">
 
-                    <div class="stat-card">
-                        <h3>Missed Doses</h3>
-                        <p id="missedThisWeek">0</p>
-                    </div>
+        <h2>📊 Analytics Dashboard</h2>
 
-                    <div class="stat-card">
-                        <h3>Appointments</h3>
-                        <p id="appointmentCount">0</p>
-                    </div>
+        <div class="stats-container">
 
-                    <div class="stat-card">
-                        <h3>Doctors</h3>
-                        <p id="doctorCount">0</p>
-                    </div>
-                </div>
+            <div class="stat-card">
+                <h3>Medicine Adherence</h3>
+                <p id="adherencePercent">0%</p>
+            </div>
 
-                <h2 class="mt">Family Member Statistics</h2>
-                <div id="familyStatsBox"></div>
-            </section>
-        </section>
+            <div class="stat-card">
+                <h3>Missed Doses</h3>
+                <p id="missedThisWeek">0</p>
+            </div>
+
+            <div class="stat-card">
+                <h3>Appointments</h3>
+                <p id="appointmentCount">0</p>
+            </div>
+
+            <div class="stat-card">
+                <h3>Doctors</h3>
+                <p id="doctorCount">0</p>
+            </div>
+
+        </div>
+
+        <h2 class="mt">👨‍👩‍👧 Family Member Statistics</h2>
+
+        <div id="familyStatsBox"></div>
+
+    </section>
+
+</section>
 
         <section id="caregiverPage" class="page-section hidden">
             <section class="panel">
@@ -260,6 +337,9 @@
                 <button onclick="loadCaregiverView()">View Patient Data</button>
 
                 <div id="caregiverData"></div>
+                <h3>Recent Alerts</h3>
+
+<div id="caregiverRecentAlerts"></div>
             </section>
 
             <section id="alertsSection" class="panel">
@@ -272,7 +352,16 @@
             <section class="panel">
                 <h2>💧 Water Reminder</h2>
                 <p>Reminds you to drink water every hour.</p>
-                <button onclick="startWaterReminder()">Start Water Reminder</button>
+                
+                <select id="waterInterval">
+                    <option value="30">30 Minutes</option>
+                    <option value="60" selected>1 Hour</option>
+                    <option value="120">2 Hours</option>
+                </select>
+
+                <button onclick="startWaterReminder()">
+                Start Reminder
+                </button>
                 <button onclick="stopWaterReminder()">Stop Water Reminder</button>
             </section>
 
@@ -317,17 +406,31 @@
                     <p style="font-size:12px; color:#6b7280; margin-top:10px; margin-bottom:0;">Don't have a key? <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:#5b5ce2; font-weight:bold; text-decoration:none;">Get a free API key from Google AI Studio →</a></p>
                 </div>
 
-                <input type="text" id="aiQuestion" placeholder="Ask a health question...">
-                <button onclick="askHealthAI()">Ask AI</button>
+                <input
+    type="text"
+    id="aiQuestion"
+    placeholder="Ask a health question..."
+>
 
-                <div id="aiAnswer"></div>
+<button onclick="askHealthAI()">
+    Ask AI
+</button>
+
+<div id="aiAnswer"></div>
+            
+
+                
             </section>
         </section>
 
         <section id="historyPage" class="page-section hidden">
             <section class="panel">
                 <h2>🔔 Notification Center</h2>
-                <div id="notificationCenter"></div>
+                <div id="notificationCenter">
+
+<p>No notifications yet.</p>
+
+</div>
             </section>
 
             <section id="historySection" class="panel">
@@ -341,7 +444,7 @@
                 <center>
                     💊 MediCare Reminder System
                     <br>
-                    Made with Firebase ❤️
+                    Your Personal Health Companion ❤️
                 </center>
             </footer>
         </section>
