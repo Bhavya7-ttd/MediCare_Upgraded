@@ -1,3 +1,4 @@
+
 if ("Notification" in window && Notification.permission !== "granted") {
     Notification.requestPermission();
 }
@@ -8,8 +9,10 @@ import {
     getAuth,
     createUserWithEmailAndPassword,
     signInWithEmailAndPassword,
+    sendPasswordResetEmail,
     signOut,
-    onAuthStateChanged
+    onAuthStateChanged,
+    sendEmailVerification
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
 import {
@@ -72,24 +75,45 @@ function createCaregiverCode(userId) {
 }
 
 async function createUserDocument(user, nameValue) {
-    const userRef = doc(db, "users", user.uid);
-    const userSnap = await getDoc(userRef);
 
-    if (!userSnap.exists()) {
-        const userName = nameValue || user.email.split("@")[0];
+    console.log("UID =", user.uid);
+    console.log("Current User =", auth.currentUser);
 
-        await setDoc(userRef, {
-            name: userName,
-            email: user.email,
-            caregiverCode: createCaregiverCode(user.uid),
-            createdAt: serverTimestamp(),
-            settings: {
-                theme: "light",
-                sound: true,
-                voice: true
-            }
-        });
+    try {
+
+        const userRef = doc(db, "users", user.uid);
+
+        console.log("Before getDoc");
+
+        const userSnap = await getDoc(userRef);
+
+        console.log("After getDoc");
+
+        if (!userSnap.exists()) {
+
+            console.log("Before setDoc");
+
+            await setDoc(userRef, {
+                name: nameValue || user.email.split("@")[0],
+                email: user.email,
+                caregiverCode: createCaregiverCode(user.uid),
+                createdAt: serverTimestamp(),
+                settings: {
+                    theme: "light",
+                    sound: true,
+                    voice: true
+                }
+            });
+
+            console.log("After setDoc");
+        }
+
+    } catch (e) {
+
+        console.error(e);
+
     }
+
 }
 
 function showNotification(title, body) {
@@ -118,6 +142,7 @@ function speakText(text) {
 }
 
 window.signup = async function () {
+
     const name = document.getElementById("signupName").value.trim();
     const email = document.getElementById("authEmail").value.trim();
     const password = document.getElementById("authPassword").value.trim();
@@ -126,37 +151,68 @@ window.signup = async function () {
     msg.innerText = "";
 
     if (name === "" || email === "" || password === "") {
+        msg.style.color = "red";
         msg.innerText = "Please fill all fields";
         return;
     }
 
-    if (firebaseConfig.apiKey === "YOUR_FIREBASE_API_KEY") {
-        msg.style.color = "#f97316";
-        msg.innerText = "⚠️ Please configure your Firebase API keys in script.js before creating an account! See README.md.";
-        return;
-    }
-
     if (password.length < 6) {
+        msg.style.color = "red";
         msg.innerText = "Password must be at least 6 characters";
         return;
     }
 
     try {
+
         msg.style.color = "#5b5ce2";
         msg.innerText = "Creating account...";
 
-        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        const userCredential =
+            await createUserWithEmailAndPassword(
+                auth,
+                email,
+                password
+            );
+
         await createUserDocument(userCredential.user, name);
 
+        await sendEmailVerification(userCredential.user);
+
+        await signOut(auth);
+
         msg.style.color = "green";
-        msg.innerText = "Account created successfully ✅";
+        msg.innerText =
+            "Verification email sent.\nPlease verify your email before logging in.";
+
     } catch (error) {
+
         msg.style.color = "red";
-        msg.innerText = error.message;
+
+        switch (error.code) {
+
+            case "auth/email-already-in-use":
+                msg.innerText = "Email already exists.";
+                break;
+
+            case "auth/invalid-email":
+                msg.innerText = "Invalid email address.";
+                break;
+
+            case "auth/weak-password":
+                msg.innerText = "Password is too weak.";
+                break;
+
+            default:
+                msg.innerText = error.message;
+
+        }
+
     }
+
 };
 
 window.login = async function () {
+
     const email = document.getElementById("authEmail").value.trim();
     const password = document.getElementById("authPassword").value.trim();
     const msg = document.getElementById("authMessage");
@@ -164,28 +220,64 @@ window.login = async function () {
     msg.innerText = "";
 
     if (email === "" || password === "") {
+        msg.style.color = "red";
         msg.innerText = "Enter email and password";
         return;
     }
 
-    if (firebaseConfig.apiKey === "YOUR_FIREBASE_API_KEY") {
-        msg.style.color = "#f97316";
-        msg.innerText = "⚠️ Please configure your Firebase API keys in script.js before logging in! See README.md.";
-        return;
-    }
-
     try {
+
         msg.style.color = "#5b5ce2";
         msg.innerText = "Logging in...";
 
-        await signInWithEmailAndPassword(auth, email, password);
+        const userCredential =
+            await signInWithEmailAndPassword(
+                auth,
+                email,
+                password
+            );
+
+        await userCredential.user.reload();
+
+        if (!userCredential.user.emailVerified) {
+
+            await signOut(auth);
+
+            msg.style.color = "red";
+            msg.innerText =
+                "Please verify your email before logging in.";
+
+            return;
+        }
 
         msg.style.color = "green";
-        msg.innerText = "Login successful ✅";
+        msg.innerText = "Login successful";
+
     } catch (error) {
+
         msg.style.color = "red";
-        msg.innerText = error.message;
+
+        switch (error.code) {
+
+            case "auth/user-not-found":
+                msg.innerText = "No account found.";
+                break;
+
+            case "auth/wrong-password":
+                msg.innerText = "Incorrect password.";
+                break;
+
+            case "auth/invalid-credential":
+                msg.innerText = "Invalid email or password.";
+                break;
+
+            default:
+                msg.innerText = error.message;
+
+        }
+
     }
+
 };
 
 window.logout = async function () {
@@ -200,8 +292,21 @@ window.logout = async function () {
 };
 
 onAuthStateChanged(auth, async function (user) {
+
     if (user) {
+
         currentUser = user;
+
+        await user.reload();
+
+        if (!user.emailVerified) {
+
+            await signOut(auth);
+
+            alert("Please verify your email before accessing MediCare.");
+
+            return;
+        }
 
         await createUserDocument(user, "");
 
@@ -211,6 +316,12 @@ onAuthStateChanged(auth, async function (user) {
 
         document.getElementById("authPage").classList.add("hidden");
         document.getElementById("appPage").classList.remove("hidden");
+
+        document.body.classList.remove("pre-auth");
+        document.getElementById("appPage").removeAttribute("inert");
+        document.getElementById("appPage").removeAttribute("aria-hidden");
+        document.getElementById("authPage").setAttribute("inert", "");
+        document.getElementById("authPage").setAttribute("aria-hidden", "true");
 
         document.getElementById("welcomeText").innerText =
             "Welcome, " + currentUserData.name + " 👋";
@@ -237,6 +348,12 @@ onAuthStateChanged(auth, async function (user) {
 
         document.getElementById("authPage").classList.remove("hidden");
         document.getElementById("appPage").classList.add("hidden");
+
+        document.body.classList.add("pre-auth");
+        document.getElementById("appPage").setAttribute("inert", "");
+        document.getElementById("appPage").setAttribute("aria-hidden", "true");
+        document.getElementById("authPage").removeAttribute("inert");
+        document.getElementById("authPage").removeAttribute("aria-hidden");
     }
 });
 
@@ -715,6 +832,10 @@ function formatTime(time) {
 }
 
 window.addAppointment = async function () {
+    if (!currentUser) {
+    alert("Please login first.");
+    return;
+}
     const doctor = document.getElementById("doctorName").value.trim();
     const hospital = document.getElementById("hospitalName").value.trim();
     const date = document.getElementById("appointmentDate").value;
@@ -1116,19 +1237,22 @@ setInterval(async () => {
 }, 1000);
 
 window.startWaterReminder = function () {
+
     if (waterReminderStarted) {
         alert("Water reminder is already running.");
         return;
     }
 
+    const minutes = Number(document.getElementById("waterInterval").value);
+
     waterReminderStarted = true;
 
-    alert("Water reminder started 💧");
+    alert("Water reminder started every " + minutes + " minutes 💧");
 
     waterReminderInterval = setInterval(() => {
         showNotification("💧 Water Reminder", "Please drink water now.");
         speakText("Please drink water now.");
-    }, 60 * 60 * 1000);
+    }, minutes * 60 * 1000);
 };
 
 window.stopWaterReminder = function () {
@@ -1548,28 +1672,48 @@ function loadEmergencyContact() {
     `;
 }
 
-window.triggerSOS = function () {
+window.triggerSOS = async function () {
+
     const emergencyName = localStorage.getItem("emergencyName") || "Emergency Contact";
     const emergencyPhone = localStorage.getItem("emergencyPhone") || "Not Set";
 
     const message =
-        "EMERGENCY ALERT!\n\nPatient may need assistance.\n\nContact: " +
-        emergencyName +
-        "\nPhone: " +
-        emergencyPhone;
+        "🚨 SOS ALERT!\nPatient requires immediate assistance.";
 
-    showNotification("🚨 Emergency SOS", message);
+    showNotification("Emergency SOS", message);
 
-    const status = document.getElementById("sosStatus");
+    if(currentUser){
 
-    if (status) {
-        status.innerHTML =
-            `<div class="medicine-card"><b>Emergency Alert Triggered!</b><br>${message.replace(/\n/g, "<br>")}</div>`;
+        await addDoc(
+            collection(db,"users",currentUser.uid,"caregiverAlerts"),
+            {
+                type:"SOS",
+                message:message,
+                phone:emergencyPhone,
+                createdAt:serverTimestamp()
+            }
+        );
+
     }
 
     alert(message);
-};
 
+}
+window.forgotPassword = async function () {
+    const email = document.getElementById("authEmail").value.trim();
+
+    if (email === "") {
+        alert("Enter your email first.");
+        return;
+    }
+
+    try {
+        await sendPasswordResetEmail(auth, email);
+        alert("Password reset email sent.");
+    } catch (error) {
+        alert(error.message);
+    }
+};
 window.addDoctor = async function () {
     if (!currentUser) {
         alert("Please login first");
@@ -1779,7 +1923,7 @@ window.askHealthAI = async function () {
 
     try {
         const response = await fetch(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY,
+"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + activeKey,
             {
                 method: "POST",
                 headers: {
