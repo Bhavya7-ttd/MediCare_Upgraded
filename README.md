@@ -104,7 +104,7 @@ If you prefer deploying via Firebase Hosting:
 
 - **Frontend**: HTML5, Vanilla CSS3 (Custom Design System & Dark Mode), JavaScript (ES Modules).
 - **Backend & Database**: Firebase Authentication, Cloud Firestore (Realtime NoSQL Database).
-- **AI & ML**: Google Gemini API (`gemini-2.5-flash`) for automated healthcare assistance.
+- **AI & ML**: Google Gemini API (`gemini-3.6-flash`) for automated healthcare assistance.
 - **PWA**: Web App Manifest & Cache API Service Worker.
 
 ---
