@@ -153,24 +153,71 @@
 
     <!-- Desktop Sidebar Navigation -->
     <aside class="sidebar">
-        <div class="logo">💊 <span>MediCare</span></div>
+        <div class="sidebar-header">
+            <div class="logo">
+                <span class="logo-icon">💊</span>
+                <span class="logo-text">MediCare</span>
+            </div>
+            <span class="logo-badge">Plus</span>
+        </div>
 
-        <nav>
-            <ul>
-                <li id="nav-dashboardPage" class="nav-item active" onclick="showPage('dashboardPage')">🏠 <span>Dashboard</span></li>
-                <li id="nav-familyPage" class="nav-item" onclick="showPage('familyPage')">👨‍👩‍👧 <span>Family</span></li>
-                <li id="nav-medicinePage" class="nav-item" onclick="showPage('medicinePage')">💊 <span>Medicines</span></li>
-                <li id="nav-appointmentPage" class="nav-item" onclick="showPage('appointmentPage')">📅 <span>Appointments</span></li>
-                <li id="nav-doctorPage" class="nav-item" onclick="showPage('doctorPage')">🏥 <span>Doctors</span></li>
-                <li id="nav-analyticsPage" class="nav-item" onclick="showPage('analyticsPage')">📊 <span>Analytics</span></li>
-                <li id="nav-caregiverPage" class="nav-item" onclick="showPage('caregiverPage')">👨‍⚕ <span>Caregiver</span></li>
-                <li id="nav-healthPage" class="nav-item" onclick="showPage('healthPage')">🩺 <span>Health Tools</span></li>
-                <li id="nav-aiPage" class="nav-item" onclick="showPage('aiPage')">🤖 <span>AI Assistant</span></li>
-                <li id="nav-historyPage" class="nav-item" onclick="showPage('historyPage')">📜 <span>History</span></li>
+        <nav class="sidebar-nav">
+            <ul class="nav-list">
+                <li id="nav-dashboardPage" class="nav-item active" onclick="showPage('dashboardPage')">
+                    <span class="nav-icon">🏠</span>
+                    <span class="nav-label">Dashboard</span>
+                </li>
+                <li id="nav-familyPage" class="nav-item" onclick="showPage('familyPage')">
+                    <span class="nav-icon">👨‍👩‍👧</span>
+                    <span class="nav-label">Family</span>
+                </li>
+                <li id="nav-medicinePage" class="nav-item" onclick="showPage('medicinePage')">
+                    <span class="nav-icon">💊</span>
+                    <span class="nav-label">Medicines</span>
+                </li>
+                <li id="nav-appointmentPage" class="nav-item" onclick="showPage('appointmentPage')">
+                    <span class="nav-icon">📅</span>
+                    <span class="nav-label">Appointments</span>
+                </li>
+
+                <li class="nav-divider"></li>
+
+                <li id="nav-doctorPage" class="nav-item" onclick="showPage('doctorPage')">
+                    <span class="nav-icon">🏥</span>
+                    <span class="nav-label">Doctors</span>
+                </li>
+                <li id="nav-analyticsPage" class="nav-item" onclick="showPage('analyticsPage')">
+                    <span class="nav-icon">📊</span>
+                    <span class="nav-label">Analytics</span>
+                </li>
+                <li id="nav-caregiverPage" class="nav-item" onclick="showPage('caregiverPage')">
+                    <span class="nav-icon">🧑‍⚕️</span>
+                    <span class="nav-label">Caregiver</span>
+                </li>
+                <li id="nav-healthPage" class="nav-item" onclick="showPage('healthPage')">
+                    <span class="nav-icon">🩺</span>
+                    <span class="nav-label">Health Tools</span>
+                </li>
+
+                <li class="nav-divider"></li>
+
+                <li id="nav-aiPage" class="nav-item" onclick="showPage('aiPage')">
+                    <span class="nav-icon">🤖</span>
+                    <span class="nav-label">AI Assistant</span>
+                </li>
+                <li id="nav-historyPage" class="nav-item" onclick="showPage('historyPage')">
+                    <span class="nav-icon">📜</span>
+                    <span class="nav-label">History</span>
+                </li>
             </ul>
         </nav>
 
-        <button class="logout-btn" onclick="logout()">🚪 Logout</button>
+        <div class="sidebar-footer">
+            <button class="logout-btn" onclick="logout()">
+                <span class="logout-icon">🚪</span>
+                <span>Sign Out</span>
+            </button>
+        </div>
     </aside>
 
     <!-- Main Content Body -->
