@@ -1,0 +1,112 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAuthorizedCaregiver(patientId) {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/users/$(patientId)/authorizedCaregivers/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(patientId)/authorizedCaregivers/$(request.auth.uid)).data.status == "approved";
+    }
+
+    // User Profile
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      // User can write their profile except caregiverCode and sensitive fields managed by server
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['caregiverCode', 'caregiverCodeExpiresAt']);
+      allow delete: if isOwner(userId);
+
+      // Medicines Subcollection
+      match /medicines/{medicineId} {
+        allow read: if isOwner(userId) || isAuthorizedCaregiver(userId);
+        allow write: if isOwner(userId);
+      }
+
+      // Appointments Subcollection
+      match /appointments/{appointmentId} {
+        allow read: if isOwner(userId) || isAuthorizedCaregiver(userId);
+        allow write: if isOwner(userId);
+      }
+
+      // History Subcollection
+      match /history/{historyId} {
+        allow read: if isOwner(userId) || isAuthorizedCaregiver(userId);
+        allow write: if isOwner(userId);
+      }
+
+      // Family Members Subcollection
+      match /familyMembers/{memberId} {
+        allow read: if isOwner(userId) || isAuthorizedCaregiver(userId);
+        allow write: if isOwner(userId);
+      }
+
+      // Doctors Subcollection
+      match /doctors/{doctorId} {
+        allow read: if isOwner(userId) || isAuthorizedCaregiver(userId);
+        allow write: if isOwner(userId);
+      }
+
+      // Prescriptions Subcollection
+      match /prescriptions/{prescriptionId} {
+        allow read: if isOwner(userId) || isAuthorizedCaregiver(userId);
+        allow write: if isOwner(userId);
+      }
+
+      // Emergency Contact Subcollection
+      match /emergencyContact/{contactId} {
+        allow read: if isOwner(userId) || isAuthorizedCaregiver(userId);
+        allow write: if isOwner(userId);
+      }
+
+      // Caregiver Alerts Subcollection
+      match /caregiverAlerts/{alertId} {
+        allow read: if isOwner(userId) || isAuthorizedCaregiver(userId);
+        allow create: if isOwner(userId);
+        allow update, delete: if isOwner(userId);
+      }
+
+      // Caregiver Requests Subcollection
+      match /caregiverRequests/{requestId} {
+        allow read: if isOwner(userId) || (isAuthenticated() && request.auth.uid == requestId);
+        allow create: if isAuthenticated() && request.auth.uid == requestId;
+        allow update, delete: if isOwner(userId);
+      }
+
+      // Authorized Caregivers Subcollection (SERVER / ADMIN SDK ONLY WRITABLE)
+      match /authorizedCaregivers/{caregiverId} {
+        allow read: if isOwner(userId) || (isAuthenticated() && request.auth.uid == caregiverId);
+        allow write: if false; // Server Admin SDK Only!
+      }
+
+      // Linked Patients Subcollection (SERVER / ADMIN SDK ONLY WRITABLE)
+      match /linkedPatients/{patientId} {
+        allow read: if isOwner(userId);
+        allow write: if false; // Server Admin SDK Only!
+      }
+
+      // AI Chat History Subcollection
+      match /aiChats/{chatId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // User Devices Subcollection (FCM Tokens)
+      match /devices/{deviceId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // Rate Limits Subcollection (SERVER / ADMIN SDK ONLY)
+      match /rateLimits/{limitId} {
+        allow read, write: if false; // Server Admin SDK Only!
+      }
+    }
+  }
+}

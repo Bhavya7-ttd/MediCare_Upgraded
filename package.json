@@ -1,0 +1,14 @@
+{
+  "name": "medicare-app",
+  "version": "2.0.0",
+  "description": "MediCare Smart Medicine Reminder & Health Assistant",
+  "main": "script.js",
+  "scripts": {
+    "test:rules": "node test/firestore.rules.test.js"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^3.0.4",
+    "mocha": "^12.0.3"
+  },
+  "private": true
+}

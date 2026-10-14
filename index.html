@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MediCare Firebase</title>
+    <title>MediCare - Smart Medicine Reminder & AI Assistant</title>
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,464 +11,819 @@
     <link rel="stylesheet" href="style.css">
     <link rel="manifest" href="manifest.json">
     <meta name="theme-color" content="#5b5ce2">
+    <!-- Chart.js for Analytics -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- jsPDF for Real PDF Generation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 </head>
 <body class="pre-auth">
 
-<div id="authPage" class="auth-page">
-    <div class="auth-card">
-        <h1>💊 MediCare</h1>
-        <p>Smart medicine reminder with Firebase</p>
+<!-- PWA & HTTPS Guidance Banner -->
+<div id="pwaNoticeBanner" class="pwa-notice-banner hidden">
+    <span id="pwaNoticeText">ℹ️ <b>PWA Push Notice:</b> Push notifications require HTTPS or localhost. On iOS Safari, tap Share ➔ "Add to Home Screen".</span>
+    <button onclick="this.parentElement.classList.add('hidden')" style="background:none;border:none;color:inherit;cursor:pointer;font-weight:bold;width:auto;margin:0;padding:0;">✕</button>
+</div>
 
-        <input type="text" id="signupName" placeholder="Full Name">
-        <input type="email" id="authEmail" placeholder="Email">
-        <input type="password" id="authPassword" placeholder="Password">
+<!-- Non-blocking Toast Container -->
+<div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-        <button onclick="signup()">Create Account</button>
-        <button class="secondary-btn" onclick="login()">Login</button>
-        <button class="secondary-btn" onclick="forgotPassword()">
-        Forgot Password?
-        </button>
-        <p style="font-size:13px;color:#6b7280;text-align:center;">
-        ⚠ Please verify your email before logging in.
-        </p>
-
-        <p id="authMessage"></p>
+<!-- Confirmation Modal -->
+<div id="confirmModal" class="modal-overlay hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+        <h3 id="modalTitle">Confirm Action</h3>
+        <p id="modalMessage">Are you sure you want to proceed?</p>
+        <div class="modal-actions">
+            <button id="modalCancelBtn" class="secondary-btn">Cancel</button>
+            <button id="modalConfirmBtn" class="delete-btn">Confirm</button>
+        </div>
     </div>
 </div>
 
+<!-- Voice Parsed Medicine Confirmation Modal -->
+<div id="voiceConfirmModal" class="modal-overlay hidden" role="dialog" aria-modal="true">
+    <div class="modal-card" style="max-width:520px;text-align:left;">
+        <h3 id="voiceModalTitle">🎤 Confirm Voice Medicine</h3>
+        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">Review and edit parsed values before saving:</p>
+        <div id="voiceAmbiguousWarning" class="toast toast-warning hidden" style="margin-bottom:12px;font-size:12px;">
+            ⚠️ AM/PM was not clearly spoken. Please verify and choose AM or PM below.
+        </div>
+        <div class="form-group">
+            <label for="voiceParsedName">Medicine Name <span style="color:var(--danger-color)">*</span></label>
+            <input type="text" id="voiceParsedName" placeholder="e.g. Dolo" required>
+        </div>
+        <div class="form-group">
+            <label for="voiceParsedDosage">Dosage <span style="color:var(--danger-color)">*</span></label>
+            <input type="text" id="voiceParsedDosage" placeholder="e.g. 650 mg, 1 tablet" required>
+        </div>
+        <div class="form-group">
+            <label for="voiceParsedTime">Scheduled Time</label>
+            <div style="display:flex;gap:8px;align-items:center;">
+                <input type="time" id="voiceParsedTime" required style="flex:1;">
+                <select id="voiceParsedMeridiem" style="width:90px;">
+                    <option value="AM">AM</option>
+                    <option value="PM">PM</option>
+                </select>
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="voiceParsedStock">Stock / Quantity <span id="voiceStockLabelHint" style="font-size:11px;color:var(--text-secondary);">(Spoken count)</span></label>
+            <input type="number" id="voiceParsedStock" min="0" placeholder="e.g. 15">
+        </div>
+        <div class="form-group">
+            <label for="voiceParsedFood">Food Timing</label>
+            <select id="voiceParsedFood">
+                <option value="After Food">After Food</option>
+                <option value="Before Food">Before Food</option>
+                <option value="With Food">With Food</option>
+                <option value="Anytime">Anytime</option>
+            </select>
+        </div>
+        <div class="modal-actions" style="margin-top:16px;">
+            <button id="voiceCancelBtn" class="secondary-btn" type="button">Cancel</button>
+            <button id="voiceSaveBtn" class="primary-btn" type="button">Save Medicine</button>
+        </div>
+    </div>
+</div>
+
+<!-- Duplicate Medicines Management Modal -->
+<div id="duplicateModal" class="modal-overlay hidden" role="dialog" aria-modal="true">
+    <div class="modal-card" style="max-width:550px;text-align:left;">
+        <h3>🔍 Duplicate Medicines</h3>
+        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">Identified matching entries (same name, dosage, time, and member):</p>
+        <div id="duplicateListContainer" style="max-height:220px;overflow-y:auto;margin-bottom:16px;"></div>
+        <div class="modal-actions" style="gap:8px;flex-wrap:wrap;">
+            <button id="duplicateCancelBtn" class="secondary-btn" type="button">Cancel</button>
+            <button id="duplicateDeleteBtn" class="delete-btn" type="button" style="width:auto;">Delete Duplicate Copies</button>
+            <button id="duplicateMergeBtn" class="primary-btn" type="button" style="width:auto;">Merge Stocks &amp; Keep 1</button>
+        </div>
+    </div>
+</div>
+
+<!-- Authentication Page -->
+<div id="authPage" class="auth-page">
+    <div class="auth-card">
+        <div class="auth-logo">💊 <span>MediCare</span></div>
+        <p class="auth-subtitle">Smart Medicine Reminder &amp; Health Assistant</p>
+
+        <!-- Auth Tabs -->
+        <div class="auth-tabs" role="tablist">
+            <button id="tabLogin" class="auth-tab active" role="tab" aria-selected="true" onclick="switchAuthTab('login')">Login</button>
+            <button id="tabSignup" class="auth-tab" role="tab" aria-selected="false" onclick="switchAuthTab('signup')">Sign Up</button>
+        </div>
+
+        <form id="authForm" onsubmit="handleAuthSubmit(event)">
+            <div id="signupNameGroup" class="form-group hidden">
+                <label for="signupName">Full Name</label>
+                <input type="text" id="signupName" placeholder="John Doe" autocomplete="name">
+            </div>
+
+            <div class="form-group">
+                <label for="authEmail">Email Address</label>
+                <input type="email" id="authEmail" placeholder="name@example.com" required autocomplete="email">
+            </div>
+
+            <div class="form-group">
+                <label for="authPassword">Password</label>
+                <div class="password-wrapper">
+                    <input type="password" id="authPassword" placeholder="••••••••" required autocomplete="current-password">
+                    <button type="button" class="password-toggle" onclick="togglePasswordVisibility('authPassword', this)" aria-label="Toggle password visibility">👁️</button>
+                </div>
+            </div>
+
+            <button type="submit" id="authSubmitBtn" class="primary-btn">
+                <span class="btn-text">Login</span>
+                <span class="btn-spinner hidden">⏳</span>
+            </button>
+        </form>
+
+        <div class="auth-links">
+            <button type="button" class="text-link" onclick="forgotPassword()">Forgot Password?</button>
+        </div>
+
+        <p class="verify-note">
+            ⚠️ Please verify your email before logging in.
+        </p>
+
+        <div id="authMessage" class="auth-message" role="alert"></div>
+    </div>
+</div>
+
+<!-- Main Application -->
 <div id="appPage" class="app hidden" inert aria-hidden="true">
 
+    <!-- Desktop Sidebar Navigation -->
     <aside class="sidebar">
         <div class="logo">💊 <span>MediCare</span></div>
 
-        <ul>
-            <li onclick="showPage('dashboardPage')">🏠 Dashboard</li>
-            <li onclick="showPage('familyPage')">👨‍👩‍👧 Family</li>
-            <li onclick="showPage('medicinePage')">💊 Medicines</li>
-            <li onclick="showPage('appointmentPage')">📅 Appointments</li>
-            <li onclick="showPage('doctorPage')">🏥 Doctors</li>
-            <li onclick="showPage('analyticsPage')">📊 Analytics</li>
-            <li onclick="showPage('caregiverPage')">👨‍⚕ Caregiver</li>
-            <li onclick="showPage('healthPage')">🩺 Health Tools</li>
-            <li onclick="showPage('aiPage')">🤖 AI Assistant</li>
-            <li onclick="showPage('historyPage')">📜 History</li>
-        </ul>
+        <nav>
+            <ul>
+                <li id="nav-dashboardPage" class="nav-item active" onclick="showPage('dashboardPage')">🏠 <span>Dashboard</span></li>
+                <li id="nav-familyPage" class="nav-item" onclick="showPage('familyPage')">👨‍👩‍👧 <span>Family</span></li>
+                <li id="nav-medicinePage" class="nav-item" onclick="showPage('medicinePage')">💊 <span>Medicines</span></li>
+                <li id="nav-appointmentPage" class="nav-item" onclick="showPage('appointmentPage')">📅 <span>Appointments</span></li>
+                <li id="nav-doctorPage" class="nav-item" onclick="showPage('doctorPage')">🏥 <span>Doctors</span></li>
+                <li id="nav-analyticsPage" class="nav-item" onclick="showPage('analyticsPage')">📊 <span>Analytics</span></li>
+                <li id="nav-caregiverPage" class="nav-item" onclick="showPage('caregiverPage')">👨‍⚕ <span>Caregiver</span></li>
+                <li id="nav-healthPage" class="nav-item" onclick="showPage('healthPage')">🩺 <span>Health Tools</span></li>
+                <li id="nav-aiPage" class="nav-item" onclick="showPage('aiPage')">🤖 <span>AI Assistant</span></li>
+                <li id="nav-historyPage" class="nav-item" onclick="showPage('historyPage')">📜 <span>History</span></li>
+            </ul>
+        </nav>
 
-        <button class="logout-btn" onclick="logout()">Logout</button>
+        <button class="logout-btn" onclick="logout()">🚪 Logout</button>
     </aside>
 
+    <!-- Main Content Body -->
     <main class="main-content">
 
+        <!-- Header Bar -->
+        <header class="top-header">
+            <div class="user-greeting">
+                <h2 id="headerWelcomeText">👋 Welcome Back</h2>
+            </div>
+            <div class="header-actions">
+                <button class="secondary-btn" style="width:auto;padding:6px 12px;font-size:12px;" onclick="enableRemindersAndNotifications()">🔔 <span id="notificationStatusText">Enable Reminders</span></button>
+                <button class="icon-btn theme-toggle-btn" onclick="toggleTheme()" title="Toggle Dark Mode" aria-label="Toggle Theme">
+                    <span id="themeIcon">🌙</span>
+                </button>
+                <div class="notification-badge-wrapper" onclick="showPage('historyPage')" title="Notifications">
+                    🔔 <span id="notificationBadge" class="badge-count hidden">0</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- DASHBOARD PAGE -->
         <section id="dashboardPage" class="page-section">
-            <section id="dashboardSection" class="hero">
-
-    <div class="hero-left">
-
-        <h1 id="welcomeText">
-            👋 Welcome Back
-        </h1>
-
-        <p class="hero-subtitle">
-            Stay healthy by keeping track of medicines,
-            appointments and daily health activities.
-        </p>
-
-        <div class="caregiver-card">
-            <span>🔐 Caregiver Code</span>
-            <h3 id="caregiverCodeText">---</h3>
-            <button class="secondary-btn" style="width:auto;padding:6px 14px;font-size:12px;margin-top:8px;" onclick="regenerateCaregiverCode()">🔄 New Code</button>
-        </div>
-
-    </div>
-
-    <div class="hero-right">
-
-        <img
-        src="https://cdn-icons-png.flaticon.com/512/2966/2966489.png"
-        class="hero-image">
-
-    </div>
-
-</section>
-
-            <section class="stats-container">
-                <div class="stat-card">
-<h3>Today's Adherence</h3>
-<p id="todayAdherence">0%</p>
-</div>
-
-<div class="stat-card">
-<h3>Health Score</h3>
-<p id="healthScore">100</p>
-</div>
-
-<div class="stat-card">
-<h3>Upcoming Appointment</h3>
-<p id="nextAppointment">None</p>
-</div>
-                <div class="stat-card"><h3>💊Total Medicines</h3><p id="totalMedicines">0</p></div>
-                <div class="stat-card"><h3>Taken</h3><p id="takenMedicines">0</p></div>
-                <div class="stat-card"><h3>Pending</h3><p id="pendingMedicines">0</p></div>
-                <div class="stat-card"><h3>Missed</h3><p id="missedMedicines">0</p></div>
-                <div class="stat-card"><h3>⏰ Next Dose</h3><p id="nextDoseText">---</p></div>
-                <div class="stat-card"><h3>👨‍👩‍👧 Family</h3><p id="familyCount">0</p></div>
+            <section class="hero">
+                <div class="hero-left">
+                    <h1 id="welcomeText">👋 Welcome</h1>
+                    <p class="hero-subtitle">
+                        Stay healthy by keeping track of medicines, appointments, and daily health activities.
+                    </p>
+                    <div class="caregiver-card">
+                        <span>🔐 Caregiver Code</span>
+                        <h3 id="caregiverCodeText">---</h3>
+                        <button class="secondary-btn" style="width:auto;padding:6px 14px;font-size:12px;margin-top:8px;" onclick="regenerateCaregiverCode()">🔄 New Code</button>
+                    </div>
+                </div>
+                <div class="hero-right">
+                    <img src="https://cdn-icons-png.flaticon.com/512/2966/2966489.png" class="hero-image" alt="Healthcare Illustration">
+                </div>
             </section>
 
-            <section class="panel">
-                <h2>
-                📊 Today's Medication Progress
-                </h2>
+            <!-- Dashboard Card Grid -->
+            <section class="stats-container">
+                <div class="stat-card ring-card">
+                    <h3>Today's Adherence</h3>
+                    <div class="progress-ring-container">
+                        <svg class="progress-ring" width="100" height="100">
+                            <circle class="progress-ring-bg" stroke="#e2e8f0" stroke-width="10" fill="transparent" r="40" cx="50" cy="50"/>
+                            <circle id="adherenceCircle" class="progress-ring-circle" stroke="#5b5ce2" stroke-width="10" stroke-dasharray="251.2" stroke-dashoffset="251.2" fill="transparent" r="40" cx="50" cy="50"/>
+                        </svg>
+                        <span id="todayAdherence" class="ring-text">0%</span>
+                    </div>
+                </div>
 
-                <p class="section-subtitle">
-                Complete today's medicines to improve your health score.
-                </p>
+                <div class="stat-card">
+                    <h3>⏰ Next Dose</h3>
+                    <p id="nextDoseText">---</p>
+                    <small id="nextDoseCountdown" class="countdown-text"></small>
+                </div>
+
+                <div class="stat-card">
+                    <h3>🔥 Adherence Streak</h3>
+                    <p id="streakCounter">0 Days</p>
+                </div>
+
+                <div class="stat-card">
+                    <h3>💊 Total Medicines</h3>
+                    <p id="totalMedicines">0</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Taken Today</h3>
+                    <p id="takenMedicines">0</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Pending</h3>
+                    <p id="pendingMedicines">0</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Missed</h3>
+                    <p id="missedMedicines">0</p>
+                </div>
+                <div class="stat-card">
+                    <h3>👨‍👩‍👧 Family Members</h3>
+                    <p id="familyCount">0</p>
+                </div>
+            </section>
+
+            <!-- Low Stock Warnings -->
+            <div id="dashboardStockAlerts"></div>
+
+            <section class="panel">
+                <h2>📊 Today's Medication Progress</h2>
+                <p class="section-subtitle">Complete today's medicines to maintain your health streak.</p>
                 <div class="progress-box"><div id="progressFill"></div></div>
                 <p id="progressText">0% completed</p>
             </section>
 
             <section class="panel">
-                <h2>
-📈 Weekly Medication Analytics
-</h2>
-
-<p class="section-subtitle">
-View your medicine adherence throughout the week.
-</p>
-                <canvas id="weeklyChart" width="600" height="250"></canvas>
+                <h2>📄 Health Report Export</h2>
+                <p class="section-subtitle">Generate a comprehensive health report including medicines, appointments, doctors, prescriptions, and history.</p>
+                <button onclick="downloadHealthReport()" class="primary-btn" style="width:auto;">📥 Download Health Report (PDF)</button>
             </section>
-
-            <section class="panel">
-
-            <h2>📄 Health Report</h2>
-
-            <p class="section-subtitle">
-                Generate a comprehensive health report including medicines,
-                appointments, doctors, prescriptions, and medication history.
-            </p>
-
-            <button onclick="downloadHealthReport()">
-                📥 Download Health Report
-            </button>
-
-        </section>
         </section>
 
+        <!-- FAMILY PAGE -->
         <section id="familyPage" class="page-section hidden">
-            <section id="familySection" class="panel">
+            <section class="panel">
                 <h2>👨‍👩‍👧 Family Members</h2>
-
-                <input type="text" id="familyMemberName" placeholder="Family member name">
-                <input type="text" id="familyMemberRelation" placeholder="Relation e.g. Mother, Father, Grandmother">
-
-                <button onclick="addFamilyMember()">+ Add Family Member</button>
+                <form onsubmit="addFamilyMember(event)">
+                    <div class="form-group">
+                        <label for="familyMemberName">Full Name</label>
+                        <input type="text" id="familyMemberName" placeholder="Name" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="familyMemberRelation">Relation</label>
+                        <select id="familyMemberRelation" required>
+                            <option value="">Select Relation</option>
+                            <option value="Mother">Mother</option>
+                            <option value="Father">Father</option>
+                            <option value="Spouse">Spouse</option>
+                            <option value="Child">Child</option>
+                            <option value="Other">Other</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="primary-btn">+ Add Family Member</button>
+                </form>
 
                 <h2 class="mt">🔍 Search Family Member</h2>
-                <input type="text" id="familySearch" placeholder="Search family member..." oninput="displayFamilyMembers()">
+                <input type="text" id="familySearch" placeholder="Search by name or relation..." oninput="displayFamilyMembers()">
 
-                <h2 class="mt">Saved Members</h2>
+                <h2 class="mt">Saved Family Members</h2>
                 <div id="familyMemberList"></div>
             </section>
         </section>
 
+        <!-- MEDICINES PAGE -->
         <section id="medicinePage" class="page-section hidden">
-            <section id="medicineSection" class="panel">
+            <section class="panel voice-panel">
+                <h2>🎤 Voice Assistant Input</h2>
+                <p class="section-subtitle">Hands-free medicine input. Say: <i>"Add Dolo 650 at 8 PM stock 15"</i></p>
+                <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px;">
+                    <select id="voiceLanguage" style="width:auto; padding:6px 10px; border-radius:6px; border:1px solid var(--border-color); background:var(--card-bg); color:var(--text-color);">
+                        <option value="en-IN" selected>English (India)</option>
+                        <option value="te-IN">Telugu (India)</option>
+                        <option value="hi-IN">Hindi (India)</option>
+                    </select>
+                    <button id="voiceBtn" onclick="toggleVoiceAssistant()" class="secondary-btn" style="width:auto;">🎤 Start Voice Input</button>
+                </div>
+                <p id="voiceText">Voice command will appear here...</p>
+            </section>
+
+            <section class="panel">
                 <h2>💊 Add / Edit Medicine</h2>
-                <section class="panel voice-panel">
-    <h2>🎤 Voice Assistant</h2>
-    <p>Say: "Add Dolo 650 at 8 PM"</p>
-
-    <button onclick="startVoiceAssistant()">
-        🎤 Start Voice Input
-    </button>
-
-    <p id="voiceText">Voice command will appear here...</p>
-</section>
                 <input type="hidden" id="editMedicineId">
 
-                <select id="medicineFamilyMember">
-                    <option value="">👤 Self</option>
-                </select>
+                <form onsubmit="saveMedicine(event)">
+                    <div class="form-group">
+                        <label for="medicineFamilyMember">Assign To</label>
+                        <select id="medicineFamilyMember">
+                            <option value="">👤 Self</option>
+                        </select>
+                    </div>
 
-                <input type="text" id="medicineName" placeholder="Medicine Name">
+                    <div class="form-group">
+                        <label for="medicineName">Medicine Name</label>
+                        <input type="text" id="medicineName" placeholder="e.g. Paracetamol" required>
+                    </div>
 
-                <select id="medicineCategory">
-                    <option value="">Select Category</option>
-                    <option value="Tablet">Tablet</option>
-                    <option value="Syrup">Syrup</option>
-                    <option value="Injection">Injection</option>
-                    <option value="Drops">Drops</option>
-                </select>
+                    <div class="form-group">
+                        <label for="medicineDosage">Dosage <span style="color:var(--danger-color)">*</span></label>
+                        <input type="text" id="medicineDosage" placeholder="e.g. 500 mg / 1 tablet" required>
+                    </div>
 
-                <input type="number" id="medicineStock" placeholder="Stock Count">
-                <input type="date" id="medicineExpiry">
+                    <div class="form-group">
+                        <label for="medicineCategory">Category</label>
+                        <select id="medicineCategory" required>
+                            <option value="">Select Category</option>
+                            <option value="Tablet">Tablet</option>
+                            <option value="Syrup">Syrup</option>
+                            <option value="Injection">Injection</option>
+                            <option value="Drops">Drops</option>
+                        </select>
+                    </div>
 
-                <div id="timeInputs">
-                    <input type="time" class="medicineTime">
+                    <div class="form-group">
+                        <label for="medicineFoodTiming">Food Timing</label>
+                        <select id="medicineFoodTiming">
+                            <option value="Before Food">Before Food</option>
+                            <option value="After Food" selected>After Food</option>
+                            <option value="With Food">With Food</option>
+                            <option value="Anytime">Anytime</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="medicineStock">Stock Count</label>
+                        <input type="number" id="medicineStock" placeholder="e.g. 20" min="0" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="medicineExpiry">Expiry Date</label>
+                        <input type="date" id="medicineExpiry">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Dose Times</label>
+                        <div id="timeInputs">
+                            <input type="time" class="medicineTime" required>
+                        </div>
+                        <button type="button" class="secondary-btn" style="width:auto;margin-top:8px;" onclick="addTimeField()">+ Add Time</button>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="repeat-box">
+                            <input type="checkbox" id="repeatDaily" checked>
+                            Repeat Daily
+                        </label>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="medicineNotes">Special Notes</label>
+                        <textarea id="medicineNotes" placeholder="e.g. Take with warm water"></textarea>
+                    </div>
+
+                    <button type="submit" class="primary-btn">+ Save Medicine</button>
+                    <button type="button" id="cancelEditMedBtn" class="secondary-btn hidden" onclick="resetMedicineForm()">Cancel Edit</button>
+                </form>
+
+                <h2 class="mt">🔍 Filter &amp; Search Medicines</h2>
+                <div class="search-bar-row">
+                    <select id="medicineFilterMember" onchange="displayMedicines()">
+                        <option value="">All Members</option>
+                    </select>
+                    <input type="text" id="searchMedicine" placeholder="Search by name, category, or member..." oninput="displayMedicines()">
                 </div>
 
-                <label class="repeat-box">
-                    <input type="checkbox" id="repeatDaily">
-                    Repeat Daily
-                </label>
-
-                <button onclick="addTimeField()">+ Add Time</button>
-                <button onclick="addMedicine()">+ Save Medicine</button>
-
-                <h2 class="mt">🔍 Filter Medicines</h2>
-
-                <select id="medicineFilterMember" onchange="displayMedicines()">
-                    <option value="">All Members</option>
-                </select>
-
-                <div class="search-box">
-                    <input
-                        type="text"
-                        id="searchMedicine"
-                        placeholder="Search by medicine name, category, family member..."
-                        oninput="displayMedicines()"
-                    >
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:24px;flex-wrap:wrap;gap:8px;">
+                    <h2 style="margin:0;">📋 Active Medicines</h2>
+                    <button type="button" class="secondary-btn" style="width:auto;padding:6px 14px;font-size:13px;" onclick="checkAndHandleDuplicates()">🔍 Manage Duplicates</button>
                 </div>
-
-                <h2 class="mt">📋 Medicine List</h2>
                 <div id="medicineList"></div>
             </section>
         </section>
 
+        <!-- APPOINTMENTS PAGE -->
         <section id="appointmentPage" class="page-section hidden">
-            <section id="appointmentSection" class="panel">
-                <h2>📅 Doctor Appointment</h2>
+            <section class="panel">
+                <h2>📅 Doctor Appointments</h2>
+                <form onsubmit="addAppointment(event)">
+                    <div class="form-group">
+                        <label for="doctorName">Doctor Name</label>
+                        <input type="text" id="doctorName" placeholder="Dr. Smith" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="hospitalName">Hospital / Clinic</label>
+                        <input type="text" id="hospitalName" placeholder="City Hospital">
+                    </div>
+                    <div class="form-group">
+                        <label for="appointmentDate">Date</label>
+                        <input type="date" id="appointmentDate" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="appointmentTime">Time</label>
+                        <input type="time" id="appointmentTime" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="appointmentNotes">Notes</label>
+                        <textarea id="appointmentNotes" placeholder="Bring previous test results"></textarea>
+                    </div>
+                    <button type="submit" class="primary-btn">+ Add Appointment</button>
+                </form>
 
-                <input type="text" id="doctorName" placeholder="Doctor Name">
-                <input type="text" id="hospitalName" placeholder="Hospital Name">
-                <input type="date" id="appointmentDate">
-                <input type="time" id="appointmentTime">
-                <textarea id="appointmentNotes" placeholder="Notes"></textarea>
-
-                <button onclick="addAppointment()">+ Add Appointment</button>
-
-                <h2 class="mt">Upcoming Appointments</h2>
+                <h2 class="mt">Upcoming Consultations</h2>
                 <div id="appointmentList"></div>
             </section>
         </section>
 
+        <!-- DOCTORS PAGE -->
         <section id="doctorPage" class="page-section hidden">
-            <section id="doctorSection" class="panel">
-                <h2>🏥 Doctor Management</h2>
-
-                <input type="text" id="doctorManageName" placeholder="Doctor Name">
-                <input type="text" id="doctorSpecialization" placeholder="Specialization">
-                <input type="tel" id="doctorContact" placeholder="Contact Number">
-                <input type="text" id="doctorHospital" placeholder="Hospital">
-
-                <button onclick="addDoctor()">+ Add Doctor</button>
+            <section class="panel">
+                <h2>🏥 Doctor Directory</h2>
+                <form onsubmit="addDoctor(event)">
+                    <div class="form-group">
+                        <label for="doctorManageName">Doctor Name</label>
+                        <input type="text" id="doctorManageName" placeholder="Dr. John Doe" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="doctorSpecialization">Specialization</label>
+                        <input type="text" id="doctorSpecialization" placeholder="Cardiologist, General Practitioner" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="doctorContact">Contact Phone</label>
+                        <input type="tel" id="doctorContact" placeholder="+1 234 567 8900" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="doctorHospital">Hospital / Clinic</label>
+                        <input type="text" id="doctorHospital" placeholder="St. Jude Clinic" required>
+                    </div>
+                    <button type="submit" class="primary-btn">+ Add Doctor</button>
+                </form>
 
                 <h2 class="mt">Saved Doctors</h2>
-                <input
-                type="text"
-                id="doctorSearch"
-                placeholder="Search Doctor..."
-                oninput="displayDoctors()">
+                <input type="text" id="doctorSearch" placeholder="Search doctor by name or specialty..." oninput="displayDoctors()">
                 <div id="doctorList"></div>
             </section>
         </section>
 
+        <!-- ANALYTICS PAGE -->
         <section id="analyticsPage" class="page-section hidden">
+            <section class="panel">
+                <h2>📊 Adherence &amp; Health Analytics</h2>
+                <div class="stats-container">
+                    <div class="stat-card">
+                        <h3>Adherence Rate</h3>
+                        <p id="adherencePercent">0%</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Missed Doses</h3>
+                        <p id="missedThisWeek">0</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Appointments</h3>
+                        <p id="appointmentCount">0</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Saved Doctors</h3>
+                        <p id="doctorCount">0</p>
+                    </div>
+                </div>
 
-    <section id="analyticsSection" class="panel">
+                <div id="analyticsChartsContainer" class="analytics-charts-grid">
+                    <div class="chart-card">
+                        <h3>Weekly Adherence Trend (Past 7 Days)</h3>
+                        <canvas id="weeklyAdherenceChart" height="220"></canvas>
+                    </div>
+                    <div class="chart-card">
+                        <h3>Missed Doses Overview (Past 7 Days)</h3>
+                        <canvas id="missedDosesChart" height="220"></canvas>
+                    </div>
+                </div>
+                <div id="analyticsEmptyState" class="empty-state hidden" style="padding:40px 20px;">
+                    <div class="empty-icon">📊</div>
+                    <h3>No Dose History Recorded Yet</h3>
+                    <p class="empty-text">Take, skip, or log medicines to view your 7-day adherence trends and health analytics!</p>
+                </div>
 
-        <h2>📊 Analytics Dashboard</h2>
+                <h2 class="mt">👨‍👩‍👧 Family Member Breakdown</h2>
+                <div id="familyStatsBox"></div>
+            </section>
+        </section>
 
-        <div class="stats-container">
-
-            <div class="stat-card">
-                <h3>Medicine Adherence</h3>
-                <p id="adherencePercent">0%</p>
-            </div>
-
-            <div class="stat-card">
-                <h3>Missed Doses</h3>
-                <p id="missedThisWeek">0</p>
-            </div>
-
-            <div class="stat-card">
-                <h3>Appointments</h3>
-                <p id="appointmentCount">0</p>
-            </div>
-
-            <div class="stat-card">
-                <h3>Doctors</h3>
-                <p id="doctorCount">0</p>
-            </div>
-
-        </div>
-
-        <h2 class="mt">👨‍👩‍👧 Family Member Statistics</h2>
-
-        <div id="familyStatsBox"></div>
-
-    </section>
-
-</section>
-
+        <!-- CAREGIVER PAGE -->
         <section id="caregiverPage" class="page-section hidden">
             <section class="panel">
                 <h2>🚨 Emergency Contact</h2>
-                <p style="font-size:13px;color:#6b7280;">
-                    Saved to your account only — no one else can see or edit this.
-                </p>
-
-                <input type="text" id="emergencyName" placeholder="Contact Name">
-                <input type="tel" id="emergencyPhone" placeholder="Phone Number">
-
-                <button onclick="saveEmergencyContact()">Save Emergency Contact</button>
-
-                <div id="emergencyContactBox"></div>
+                <p class="section-subtitle">Saved privately to your account for emergency reference.</p>
+                <form onsubmit="saveEmergencyContact(event)">
+                    <div class="form-group">
+                        <label for="emergencyName">Contact Name</label>
+                        <input type="text" id="emergencyName" placeholder="Name" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="emergencyPhone">Phone Number</label>
+                        <input type="tel" id="emergencyPhone" placeholder="+1 234 567 8900" required>
+                    </div>
+                    <button type="submit" class="primary-btn">Save Emergency Contact</button>
+                </form>
+                <div id="emergencyContactBox" class="mt"></div>
             </section>
 
             <section class="panel">
                 <h2>🚨 Emergency SOS</h2>
-                <p style="font-size:13px;color:#6b7280;">
-                    Sends a real-time alert to your authorized caregiver's dashboard and
-                    a browser notification. This does <b>not</b> send an SMS, WhatsApp
-                    message, or phone call — those would require a backend notification
-                    service (see note below). You'll always see whether the alert was
-                    actually sent.
-                </p>
-                <button id="sosButton" onclick="triggerSOS()">🚨 SEND EMERGENCY ALERT</button>
-                <div id="sosStatus"></div>
+                <p class="section-subtitle">Sends an immediate real-time SOS broadcast to your authorized caregiver's devices.</p>
+                <button id="sosButton" class="delete-btn sos-main-btn" onclick="triggerSOS()">🚨 SEND EMERGENCY SOS ALERT</button>
+                <div id="sosStatus" class="mt"></div>
             </section>
 
-            <section id="caregiverSection" class="panel">
-                <h2>👨‍⚕ Caregiver View</h2>
-
-                <p>Share this code with your caregiver so they can link to your account:</p>
+            <section class="panel">
+                <h2>👨‍⚕ Caregiver Connection Portal</h2>
+                <p>Share this code with your caregiver to allow them to monitor your adherence:</p>
                 <div class="code-box" id="myCaregiverCode">---</div>
 
-                <h3 class="mt">My Patients</h3>
+                <h3 class="mt">📥 Pending Caregiver Link Requests</h3>
+                <p class="section-subtitle">Caregivers requesting access to your health monitoring dashboard.</p>
+                <div id="caregiverRequestsList"></div>
+
+                <h3 class="mt">✅ Authorized Caregivers</h3>
+                <div id="authorizedCaregiversList"></div>
+
+                <h3 class="mt">🔗 Connect to a Patient (For Caregivers)</h3>
+                <p class="section-subtitle">Enter a patient's code to send them a link request.</p>
+                <div class="form-group">
+                    <label for="caregiverSearchCode">Patient Caregiver Code</label>
+                    <input type="text" id="caregiverSearchCode" placeholder="Enter Patient Code e.g. CG-ABC123">
+                    <button type="button" class="primary-btn" onclick="requestPatientLink()">Request Patient Link</button>
+                </div>
+
+                <h3 class="mt">My Linked Patients</h3>
                 <div id="linkedPatientsList"></div>
 
-                <p class="mt">Link a new patient using their caregiver code:</p>
-                <input type="text" id="caregiverSearchCode" placeholder="Enter patient caregiver code">
-                <button onclick="linkAndViewPatient()">Link &amp; View Patient</button>
+                <div id="caregiverData" class="mt"></div>
 
-                <div id="caregiverData"></div>
-
-                <h3 class="mt">🚨 Emergency Alerts</h3>
+                <h3 class="mt">🚨 Patient Live Alerts Feed</h3>
                 <div id="caregiverViewAlertList"></div>
             </section>
 
-            <section id="alertsSection" class="panel">
-                <h2>🔔 My Alerts &amp; Status</h2>
-                <p style="font-size:13px;color:#6b7280;">
-                    Your own SOS and missed-dose alerts, and whether your caregiver has
-                    seen them.
-                </p>
-                <div id="caregiverAlertList"></div>
+            <section class="panel danger-zone-panel">
+                <h2 style="color:var(--danger-color);">⚠️ Account & Data Management</h2>
+                <p class="section-subtitle">Permanently delete your profile, medicine logs, prescriptions, device tokens, and all account data.</p>
+                <button class="delete-btn" style="width:auto;" onclick="confirmDeleteAccount()">🗑 Delete My Account & All My Data</button>
             </section>
         </section>
 
+        <!-- HEALTH TOOLS PAGE -->
         <section id="healthPage" class="page-section hidden">
             <section class="panel">
-                <h2>💧 Water Reminder</h2>
-                <p>Reminds you to drink water every hour.</p>
-                
-                <select id="waterInterval">
-                    <option value="30">30 Minutes</option>
-                    <option value="60" selected>1 Hour</option>
-                    <option value="120">2 Hours</option>
-                </select>
-
-                <button onclick="startWaterReminder()">
-                Start Reminder
-                </button>
-                <button onclick="stopWaterReminder()">Stop Water Reminder</button>
+                <h2>🔔 Push Notifications & Reminder Settings</h2>
+                <p class="section-subtitle">Manage browser notification permissions and test push delivery.</p>
+                <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">
+                    <span>Status: <strong id="healthPagePermStatus">Unknown</strong></span>
+                    <button onclick="enableRemindersAndNotifications()" class="primary-btn" style="width:auto;">Request Permission</button>
+                    <button onclick="sendTestNotification()" class="secondary-btn" style="width:auto;">🧪 Send Test Notification</button>
+                </div>
+                <div id="notificationUnblockHelp" class="hidden" style="background:var(--bg-secondary); padding:10px; border-radius:8px; font-size:13px; color:var(--text-secondary);">
+                    <b>How to unblock notifications:</b><br>
+                    1. Click the lock/tune icon next to the URL in your browser address bar.<br>
+                    2. Change "Notifications" setting from <i>Block</i> to <i>Allow</i>.<br>
+                    3. Refresh this page.
+                </div>
             </section>
 
             <section class="panel">
-                <h2>⚖ BMI Calculator</h2>
-                <input type="number" id="heightInput" placeholder="Height in cm">
-                <input type="number" id="weightInput" placeholder="Weight in kg">
-                <button onclick="calculateBMI()">Calculate BMI</button>
-                <p id="bmiResult"></p>
+                <h2>🔊 Spoken Reminders Settings</h2>
+                <p class="section-subtitle">Configure text-to-speech voice announcements for due medicine reminders.</p>
+
+                <div class="form-group">
+                    <label class="repeat-box" style="font-weight:600; cursor:pointer;">
+                        <input type="checkbox" id="speakRemindersToggle" checked onchange="updateSpeechSettings()">
+                        Speak reminders aloud
+                    </label>
+                </div>
+
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:15px; margin-bottom:15px;">
+                    <div class="form-group">
+                        <label for="voiceLanguageSelect">Voice Language</label>
+                        <select id="voiceLanguageSelect" onchange="updateSpeechSettings()">
+                            <option value="en-IN" selected>English (India) [en-IN]</option>
+                            <option value="te-IN">Telugu (India) [te-IN]</option>
+                            <option value="hi-IN">Hindi (India) [hi-IN]</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="voiceVolume">Volume (<span id="voiceVolumeVal">100</span>%)</label>
+                        <input type="range" id="voiceVolume" min="0" max="100" value="100" oninput="updateSpeechSettings()">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="voiceRate">Speed / Rate (<span id="voiceRateVal">1.0</span>x)</label>
+                        <input type="range" id="voiceRate" min="0.5" max="2.0" step="0.1" value="1.0" oninput="updateSpeechSettings()">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="repeat-box" style="font-size:13px; color:var(--text-secondary); cursor:pointer;">
+                        <input type="checkbox" id="aiReminderPhraseToggle" onchange="updateSpeechSettings()">
+                        Use Gemini AI to generate friendly reminder sentences (Optional)
+                    </label>
+                </div>
+
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <button type="button" onclick="testVoiceReminder()" class="secondary-btn" style="width:auto;">🔊 Test Voice</button>
+                    <span id="speechStatusMessage" style="font-size:12px; color:var(--text-secondary);"></span>
+                </div>
             </section>
 
-            <section id="prescriptionSection" class="panel">
-                <h2>📄 Prescription Records</h2>
+            <section class="panel">
+                <h2>💧 Water Intake Reminder</h2>
+                <p class="section-subtitle">Receive browser notifications to stay hydrated throughout the day.</p>
+                <div class="form-group">
+                    <label for="waterInterval">Reminder Interval</label>
+                    <select id="waterInterval">
+                        <option value="30">Every 30 Minutes</option>
+                        <option value="60" selected>Every 1 Hour</option>
+                        <option value="120">Every 2 Hours</option>
+                    </select>
+                </div>
+                <button onclick="startWaterReminder()" class="primary-btn" style="width:auto;">Start Reminder</button>
+                <button onclick="stopWaterReminder()" class="secondary-btn" style="width:auto;">Stop Reminder</button>
+            </section>
 
-                <input type="text" id="prescriptionDoctor" placeholder="Doctor Name">
-                <input type="text" id="prescriptionMedicine" placeholder="Medicine / Prescription Name">
-                <input type="date" id="prescriptionDate">
-                <textarea id="prescriptionNotes" placeholder="Prescription notes"></textarea>
+            <section class="panel">
+                <h2>⚖ BMI Health Calculator</h2>
+                <form onsubmit="calculateBMI(event)">
+                    <div class="form-group">
+                        <label for="heightInput">Height (cm)</label>
+                        <input type="number" id="heightInput" placeholder="170" required min="50" max="250">
+                    </div>
+                    <div class="form-group">
+                        <label for="weightInput">Weight (kg)</label>
+                        <input type="number" id="weightInput" placeholder="70" required min="20" max="300">
+                    </div>
+                    <button type="submit" class="primary-btn">Calculate BMI</button>
+                </form>
+                <div id="bmiResultContainer" class="mt"></div>
+            </section>
 
-                <button onclick="addPrescriptionRecord()">+ Add Prescription Record</button>
+            <section class="panel">
+                <h2>📄 Prescription Records &amp; Image Archive</h2>
+                <form onsubmit="addPrescriptionRecord(event)">
+                    <div class="form-group">
+                        <label for="prescriptionDoctor">Doctor Name</label>
+                        <input type="text" id="prescriptionDoctor" placeholder="Dr. Smith" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="prescriptionMedicine">Prescription Title / Medicines</label>
+                        <input type="text" id="prescriptionMedicine" placeholder="e.g. Antibiotics Course" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="prescriptionDate">Date</label>
+                        <input type="date" id="prescriptionDate" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="prescriptionFile">Prescription Image / Document (PNG, JPG, PDF)</label>
+                        <input type="file" id="prescriptionFile" accept="image/*,.pdf">
+                    </div>
+                    <div class="form-group">
+                        <label for="prescriptionNotes">Notes</label>
+                        <textarea id="prescriptionNotes" placeholder="Dosage instructions or follow-up notes"></textarea>
+                    </div>
+                    <button type="submit" class="primary-btn">+ Save Prescription Record</button>
+                </form>
 
                 <h2 class="mt">Saved Prescriptions</h2>
                 <div id="prescriptionList"></div>
             </section>
-
-            <section class="panel">
-                <h2>💡 Daily Health Tip</h2>
-                <div id="healthTip">Drink enough water and take medicines on time.</div>
-            </section>
         </section>
 
+        <!-- AI ASSISTANT PAGE -->
         <section id="aiPage" class="page-section hidden">
-            <section id="aiSection" class="panel">
-                <h2>🤖 Real AI Health Assistant</h2>
-
-                <div class="code-box" style="margin-bottom: 25px; background: #eef2ff; border: 1px solid #dfe3ff; text-align: left;">
-                    <label for="geminiInput" style="display:block; font-size:14px; margin-bottom:8px; color:#374151;"><b>🔑 Google Gemini API Key</b> (Stored securely in your browser)</label>
-                    <div style="display:flex; gap:10px; flex-wrap:wrap;">
-                        <input type="password" id="geminiInput" placeholder="Enter your Gemini API Key (AIza...)" style="margin-bottom:0; flex:1; min-width:200px;">
-                        <button onclick="saveGeminiKey()" style="width:auto; margin-bottom:0; padding:12px 24px;">Save Key</button>
+            <section class="panel" style="margin-bottom:15px;">
+                <h2>🔑 Google Gemini API Key Setup</h2>
+                <p class="section-subtitle">Each user needs their own Gemini API key. The key is stored only in this browser (`localStorage` under `medicare_gemini_key`) and is never sent to any server other than Google Gemini API.</p>
+                <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+                    <input type="password" id="userGeminiApiKey" placeholder="Paste your Gemini API Key here (e.g. AIzaSy...)" style="flex:1; min-width:260px; margin-bottom:0;" autocomplete="off">
+                    <button type="button" class="primary-btn" style="width:auto; white-space:nowrap;" onclick="saveGeminiKey()">💾 Save Key</button>
+                    <button type="button" class="secondary-btn" style="width:auto; white-space:nowrap;" onclick="removeGeminiKey()">🗑 Remove Key</button>
+                    <button type="button" class="secondary-btn" style="width:auto; white-space:nowrap;" onclick="testGeminiKey()">🧪 Test Key</button>
+                </div>
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; font-size:12px;">
+                    <div>
+                        <span id="geminiKeyStatusText" style="color:var(--text-secondary); font-weight:500;">Status: No key saved.</span>
+                        <span id="geminiActiveModelText" style="margin-left: 15px; color:var(--text-secondary); font-weight:500;">Active Model: ---</span>
                     </div>
-                    <p style="font-size:12px; color:#6b7280; margin-top:10px; margin-bottom:0;">Don't have a key? <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:#5b5ce2; font-weight:bold; text-decoration:none;">Get a free API key from Google AI Studio →</a></p>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <label for="geminiModelOverride" style="margin:0; font-weight:500; font-size:12px;">Model:</label>
+                        <select id="geminiModelOverride" style="padding:4px; font-size:12px; border-radius:4px; border:1px solid var(--border-color); background:var(--card-bg); color:var(--text-color);">
+                            <option value="auto">Auto (Recommended)</option>
+                        </select>
+                        <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener" style="color:var(--primary-color); font-weight:600; text-decoration:underline; margin-left:10px;">🔗 Get a free key</a>
+                    </div>
+                </div>
+            </section>
+
+
+            <section class="panel ai-chat-panel">
+                <h2>🤖 MediCare AI Assistant</h2>
+
+                <div class="ai-disclaimer-banner">
+                    ⚠️ <b>Medical Disclaimer</b>: MediCare AI provides general informational assistance based on your active health profile. It is <b>not</b> a substitute for professional medical diagnosis or treatment. For urgent health issues or emergencies, contact emergency services (911/108) immediately.
                 </div>
 
-                <input
-    type="text"
-    id="aiQuestion"
-    placeholder="Ask a health question..."
->
 
-<button onclick="askHealthAI()">
-    Ask AI
-</button>
+                <div class="form-group" style="margin-bottom:12px;">
+                    <label style="font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:6px;">
+                        <input type="checkbox" id="aiConsentCheckbox" checked style="width:auto;margin:0;">
+                        I agree that my question and active medication context will be processed securely by Google Gemini AI.
+                    </label>
+                </div>
 
-<div id="aiAnswer"></div>
-            
+                <div id="chatHistory" class="chat-history-box">
+                    <div class="chat-bubble assistant-bubble">
+                        👋 Hello! I am your MediCare AI Health Assistant. Ask me about your medicine schedules, general health guidance, or wellness tips!
+                    </div>
+                </div>
 
-                
+                <form onsubmit="askHealthAI(event)" class="chat-input-row">
+                    <input type="text" id="aiQuestion" placeholder="Ask a health question (e.g. When should I take my morning dose?)..." required autocomplete="off">
+                    <button type="submit" id="aiSubmitBtn" class="primary-btn" style="width:auto;">Send 🚀</button>
+                </form>
             </section>
         </section>
 
+        <!-- HISTORY / NOTIFICATION CENTER PAGE -->
         <section id="historyPage" class="page-section hidden">
             <section class="panel">
-                <h2>🔔 Notification Center</h2>
-                <div id="notificationCenter">
-
-<p>No notifications yet.</p>
-
-</div>
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+                    <h2>🔔 Notification Center & SOS Log</h2>
+                    <button onclick="clearNotificationHistory()" class="secondary-btn" style="width:auto; padding:6px 12px; font-size:12px;">🗑 Clear History</button>
+                </div>
+                <div id="caregiverAlertList" class="mt">
+                    <p class="empty-text">No recent alerts or notifications.</p>
+                </div>
+                <div id="notificationCenter" class="mt"></div>
             </section>
 
-            <section id="historySection" class="panel">
-                <h2>📜 History</h2>
-                <div id="historyList"></div>
+            <section class="panel">
+                <h2>📜 Dose History &amp; Log</h2>
+                <div class="filter-row" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <label for="historyFilterDate">Filter by Date:</label>
+                        <select id="historyFilterDate" onchange="filterHistoryByDate()">
+                            <option value="all">All Time</option>
+                            <option value="today">Today</option>
+                            <option value="week">Past 7 Days</option>
+                        </select>
+                    </div>
+                    <button type="button" class="secondary-btn" style="width:auto;padding:6px 14px;font-size:13px;" onclick="clearOldHistory()">🧹 Clear Old History (&gt;7 days missed)</button>
+                </div>
+                <div id="historyList" class="mt"></div>
             </section>
-
-            <button onclick="toggleTheme()">🌙 Toggle Theme</button>
-
-            <footer class="panel">
-                <center>
-                    💊 MediCare Reminder System
-                    <br>
-                    Your Personal Health Companion ❤️
-                </center>
-            </footer>
         </section>
 
+        <!-- Privacy Policy Modal -->
+        <div id="privacyModal" class="modal-overlay hidden" role="dialog" aria-modal="true">
+            <div class="modal-card" style="max-width:600px; text-align:left;">
+                <h3>🔒 MediCare Privacy Policy</h3>
+                <div style="max-height:300px; overflow-y:auto; font-size:13px; line-height:1.6; margin:15px 0;">
+                    <p><b>1. Data Ownership & Storage:</b> Your personal health records, medicine schedules, appointments, and prescriptions are stored securely in Google Firebase Firestore and Firebase Storage associated strictly with your authenticated user account.</p>
+                    <p><b>2. Caregiver Access:</b> Patient data is only accessible to authorized caregivers after explicit link confirmation via 24-hour single-use caregiver codes. Access can be revoked at any time.</p>
+                    <p><b>3. AI Assistant:</b> Health questions submitted via the AI Assistant are processed securely by Google Gemini API. No identifiable personal health information is sold or shared with third parties.</p>
+                    <p><b>4. Data Deletion:</b> You retain full control to permanently delete your account and all associated Firestore documents, Storage files, and device tokens at any time using the "Delete My Account" feature in Caregiver/Account settings.</p>
+                </div>
+                <div class="modal-actions">
+                    <button onclick="document.getElementById('privacyModal').classList.add('hidden')" class="primary-btn">Close</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- App Footer -->
+        <footer class="app-footer">
+            <p>💊 <b>MediCare Reminder System</b> — Your Personal Healthcare Companion ❤️ | <a href="#" onclick="document.getElementById('privacyModal').classList.remove('hidden'); return false;" style="color:var(--primary-color);">Privacy Policy</a></p>
+        </footer>
+
     </main>
+
+    <!-- Mobile Bottom Tab Bar -->
+    <nav class="mobile-tab-bar">
+        <button onclick="showPage('dashboardPage')" title="Dashboard">🏠<span>Dashboard</span></button>
+        <button onclick="showPage('medicinePage')" title="Medicines">💊<span>Medicines</span></button>
+        <button onclick="showPage('caregiverPage')" title="SOS">🚨<span>SOS</span></button>
+        <button onclick="showPage('aiPage')" title="AI">🤖<span>AI</span></button>
+        <button onclick="showPage('historyPage')" title="History">📜<span>History</span></button>
+    </nav>
 </div>
 
 <script type="module" src="script.js"></script>

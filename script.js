@@ -1,6 +1,6 @@
-if ("Notification" in window && Notification.permission !== "granted") {
-    Notification.requestPermission();
-}
+// ==========================================================================
+// MediCare Web Application Script (ES Modules + Firebase)
+// ==========================================================================
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 
@@ -31,6 +31,26 @@ import {
     getDocs
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
+import {
+    getMessaging,
+    getToken,
+    onMessage
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging.js";
+
+import {
+    getFunctions,
+    httpsCallable,
+    connectFunctionsEmulator
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
+
+import {
+    getStorage,
+    ref as storageRef,
+    uploadBytes,
+    getDownloadURL
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+
+// Firebase Configuration
 const firebaseConfig = {
     apiKey: "AIzaSyAjwRvLU0QITWM6XUdU6iCbqGCu71uI3WU",
     authDomain: "medicare-5011c.firebaseapp.com",
@@ -40,12 +60,25 @@ const firebaseConfig = {
     appId: "1:417059900592:web:7bad70ab56f29a9dc27f75"
 };
 
-let GEMINI_API_KEY = localStorage.getItem("userGeminiKey") || "";
-
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+const functions = getFunctions(app);
 
+// Connect Functions Emulator on localhost
+if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
+    try {
+        connectFunctionsEmulator(functions, "localhost", 5001);
+        console.log("[FirebaseEmulators] Connected Firebase Functions to localhost:5001");
+    } catch (emuErr) {
+        console.warn("[FirebaseEmulators] Emulator connect notice:", emuErr);
+    }
+}
+
+const storage = getStorage(app);
+
+
+// Application State Variables
 let currentUser = null;
 let currentUserData = null;
 
@@ -55,6 +88,8 @@ let historyItems = [];
 let familyMembers = [];
 let caregiverAlerts = [];
 let doctors = [];
+let prescriptions = [];
+let aiChats = [];
 
 let unsubscribeMedicines = null;
 let unsubscribeAppointments = null;
@@ -62,273 +97,318 @@ let unsubscribeHistory = null;
 let unsubscribeFamilyMembers = null;
 let unsubscribeCaregiverAlerts = null;
 let unsubscribeDoctors = null;
-
-// ---------- SOS / Emergency alert state ----------
 let unsubscribeCaregiverViewAlerts = null;
-let caregiverAlertsFirstLoad = true;
-let caregiverViewAlertsFirstLoad = true;
+let unsubscribeAIChats = null;
+
 let viewedPatientId = null;
 let viewedPatientName = null;
 let sosSending = false;
-
 let snoozeMap = {};
 let expiryAlertMap = {};
-
-let waterReminderStarted = false;
 let waterReminderInterval = null;
+let currentAuthTab = "login";
 
-function createCaregiverCode(userId) {
-    return "CG-" + userId.substring(0, 8).toUpperCase();
+// Chart.js Instances
+let weeklyAdherenceChartInstance = null;
+let missedDosesChartInstance = null;
+
+// --------------------------------------------------------------------------
+// Non-Blocking Toast Notification System (Replaces alert())
+// --------------------------------------------------------------------------
+window.showToast = function (message, type = "info", duration = 3500) {
+    const container = document.getElementById("toastContainer");
+    if (!container) return;
+
+    const toast = document.createElement("div");
+    toast.className = `toast toast-${type}`;
+    toast.innerHTML = `
+        <span>${message}</span>
+        <button onclick="this.parentElement.remove()" style="background:none;border:none;color:inherit;cursor:pointer;font-size:16px;padding:0;margin:0;width:auto;">✕</button>
+    `;
+
+    container.appendChild(toast);
+
+    setTimeout(() => {
+        toast.classList.add("toast-out");
+        setTimeout(() => toast.remove(), 200);
+    }, duration);
+};
+
+// --------------------------------------------------------------------------
+// Accessible Confirmation Modal (Replaces confirm())
+// --------------------------------------------------------------------------
+window.showConfirmModal = function (title, message) {
+    return new Promise((resolve) => {
+        const modal = document.getElementById("confirmModal");
+        const modalTitle = document.getElementById("modalTitle");
+        const modalMsg = document.getElementById("modalMessage");
+        const confirmBtn = document.getElementById("modalConfirmBtn");
+        const cancelBtn = document.getElementById("modalCancelBtn");
+
+        if (!modal) {
+            resolve(window.confirm(message));
+            return;
+        }
+
+        modalTitle.innerText = title;
+        modalMsg.innerText = message;
+        modal.classList.remove("hidden");
+
+        const cleanup = () => {
+            modal.classList.add("hidden");
+            confirmBtn.onclick = null;
+            cancelBtn.onclick = null;
+        };
+
+        confirmBtn.onclick = () => { cleanup(); resolve(true); };
+        cancelBtn.onclick = () => { cleanup(); resolve(false); };
+    });
+};
+
+// --------------------------------------------------------------------------
+// PWA & Firebase Cloud Messaging (FCM) Initialization
+// --------------------------------------------------------------------------
+let swRegistration = null;
+
+if ("serviceWorker" in navigator) {
+    window.addEventListener("load", async () => {
+        try {
+            swRegistration = await navigator.serviceWorker.register("sw.js");
+            console.log("Service Worker registered:", swRegistration.scope);
+
+            // Force check for updates on page load
+            swRegistration.update();
+
+            if (swRegistration.waiting) {
+                showSWUpdateToast();
+            }
+
+            swRegistration.addEventListener("updatefound", () => {
+                const newWorker = swRegistration.installing;
+                if (newWorker) {
+                    newWorker.addEventListener("statechange", () => {
+                        if (newWorker.state === "installed" && navigator.serviceWorker.controller) {
+                            showSWUpdateToast();
+                        }
+                    });
+                }
+            });
+        } catch (err) {
+            console.warn("SW registration notice:", err);
+        }
+    });
 }
 
-// A caregiver code is a one-time "introduction" token used to create a
-// persistent, verified patient<->caregiver link — never a password used
-// on every access. New/regenerated codes are randomly generated instead
-// of derived from the UID, so they can't be guessed from a patient's uid.
-function generateRandomCaregiverCode() {
-    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let code = "";
-    for (let i = 0; i < 6; i++) {
-        code += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return "CG-" + code;
+function showSWUpdateToast() {
+    showToast(
+        `⚡ New version available! <button onclick="window.location.reload()" style="background:#fff; color:#111; border:none; padding:4px 10px; border-radius:4px; margin-left:8px; cursor:pointer; font-weight:bold;">Refresh</button>`,
+        "info",
+        10000
+    );
 }
 
-window.regenerateCaregiverCode = async function () {
-    if (!currentUser) return;
 
-    if (!confirm("Generate a new caregiver code? Caregivers already linked to you will keep their access — only the code shown to NEW caregivers changes.")) {
-        return;
+function getDeviceId() {
+    let id = localStorage.getItem("medicare_device_id");
+    if (!id) {
+        id = "dev_" + Math.random().toString(36).substring(2, 11) + "_" + Date.now();
+        localStorage.setItem("medicare_device_id", id);
     }
+    return id;
+}
 
-    const newCode = generateRandomCaregiverCode();
-
+async function initFCM(user) {
     try {
-        await updateDoc(doc(db, "users", currentUser.uid), {
-            caregiverCode: newCode
+        const isHttps = window.location.protocol === "https:" || window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+        const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+
+        const pwaBanner = document.getElementById("pwaNoticeBanner");
+        if (pwaBanner && (!isHttps || isIos)) {
+            pwaBanner.classList.remove("hidden");
+        }
+
+        if (!("Notification" in window)) return;
+        const permission = await Notification.requestPermission();
+        if (permission !== "granted") return;
+
+        const messaging = getMessaging(app);
+        const options = {
+            vapidKey: "BEl62iUYgUivxIkv69yViEuiC2PEc0Rt2hN5P5qW4x-7lWp-2b7k2c6"
+        };
+        if (swRegistration) options.serviceWorkerRegistration = swRegistration;
+
+        const token = await getToken(messaging, options).catch(e => console.warn("FCM Token notice:", e.message));
+
+        if (token && user) {
+            const deviceId = getDeviceId();
+            await setDoc(doc(db, "users", user.uid, "devices", deviceId), {
+                token,
+                userAgent: navigator.userAgent,
+                updatedAt: serverTimestamp()
+            }, { merge: true });
+        }
+
+        onMessage(messaging, (payload) => {
+            showToast(`🔔 ${payload.notification?.title || "Reminder"}: ${payload.notification?.body || ""}`, "info", 5000);
         });
-
-        currentUserData.caregiverCode = newCode;
-
-        const a = document.getElementById("caregiverCodeText");
-        const b = document.getElementById("myCaregiverCode");
-        if (a) a.innerText = newCode;
-        if (b) b.innerText = newCode;
-
-        alert("New caregiver code generated ✅");
     } catch (e) {
-        console.error("Could not regenerate caregiver code", e);
-        alert("Could not generate a new code. Please try again.");
+        console.warn("FCM Notice:", e.message);
+    }
+}
+
+// --------------------------------------------------------------------------
+// Authentication Flow & Tab Management
+// --------------------------------------------------------------------------
+window.switchAuthTab = function (tab) {
+    currentAuthTab = tab;
+    const loginTab = document.getElementById("tabLogin");
+    const signupTab = document.getElementById("tabSignup");
+    const nameGroup = document.getElementById("signupNameGroup");
+    const submitBtnText = document.querySelector("#authSubmitBtn .btn-text");
+
+    if (tab === "signup") {
+        signupTab.classList.add("active");
+        loginTab.classList.remove("active");
+        nameGroup.classList.remove("hidden");
+        if (submitBtnText) submitBtnText.innerText = "Create Account";
+    } else {
+        loginTab.classList.add("active");
+        signupTab.classList.remove("active");
+        nameGroup.classList.add("hidden");
+        if (submitBtnText) submitBtnText.innerText = "Login";
+    }
+    document.getElementById("authMessage").innerText = "";
+};
+
+window.togglePasswordVisibility = function (inputId, btn) {
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    if (input.type === "password") {
+        input.type = "text";
+        btn.innerText = "🙈";
+    } else {
+        input.type = "password";
+        btn.innerText = "👁️";
     }
 };
 
-async function createUserDocument(user, nameValue) {
-
-    console.log("UID =", user.uid);
-    console.log("Current User =", auth.currentUser);
-
-    try {
-
-        const userRef = doc(db, "users", user.uid);
-
-        console.log("Before getDoc");
-
-        const userSnap = await getDoc(userRef);
-
-        console.log("After getDoc");
-
-        if (!userSnap.exists()) {
-
-            console.log("Before setDoc");
-
-            await setDoc(userRef, {
-                name: nameValue || user.email.split("@")[0],
-                email: user.email,
-                caregiverCode: createCaregiverCode(user.uid),
-                createdAt: serverTimestamp(),
-                settings: {
-                    theme: "light",
-                    sound: true,
-                    voice: true
-                }
-            });
-
-            console.log("After setDoc");
-        }
-
-    } catch (e) {
-
-        console.error(e);
-
+window.handleAuthSubmit = async function (e) {
+    e.preventDefault();
+    if (currentAuthTab === "signup") {
+        await handleSignup();
+    } else {
+        await handleLogin();
     }
+};
 
-}
-
-function showNotification(title, body) {
-    if ("Notification" in window && Notification.permission === "granted") {
-        new Notification(title, { body });
-    }
-    const center = document.getElementById("notificationCenter");
-    if (center) {
-        const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-        center.insertAdjacentHTML("afterbegin", `
-            <div class="alert-card" style="border-left-color: #5b5ce2; margin-bottom: 10px;">
-                <div style="display:flex; justify-content:space-between; font-size:12px; color:#6b7280; margin-bottom:4px;">
-                    <b>${title}</b><span>${timeStr}</span>
-                </div>
-                <p style="font-size:14px; margin:0; color:inherit;">${body}</p>
-            </div>
-        `);
-    }
-}
-
-function speakText(text) {
-    if ("speechSynthesis" in window) {
-        speechSynthesis.cancel();
-        speechSynthesis.speak(new SpeechSynthesisUtterance(text));
-    }
-}
-
-window.signup = async function () {
-
+async function handleSignup() {
     const name = document.getElementById("signupName").value.trim();
     const email = document.getElementById("authEmail").value.trim();
     const password = document.getElementById("authPassword").value.trim();
     const msg = document.getElementById("authMessage");
 
     msg.innerText = "";
-
-    if (name === "" || email === "" || password === "") {
-        msg.style.color = "red";
-        msg.innerText = "Please fill all fields";
+    if (!name || !email || !password) {
+        msg.style.color = "var(--danger-color)";
+        msg.innerText = "Please complete all fields.";
         return;
     }
-
     if (password.length < 6) {
-        msg.style.color = "red";
-        msg.innerText = "Password must be at least 6 characters";
+        msg.style.color = "var(--danger-color)";
+        msg.innerText = "Password must be at least 6 characters.";
         return;
     }
 
+    setAuthLoading(true);
     try {
-
-        msg.style.color = "#5b5ce2";
-        msg.innerText = "Creating account...";
-
-        const userCredential =
-            await createUserWithEmailAndPassword(
-                auth,
-                email,
-                password
-            );
-
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
         await createUserDocument(userCredential.user, name);
-
         await sendEmailVerification(userCredential.user);
-
         await signOut(auth);
 
-        msg.style.color = "green";
-        msg.innerText =
-            "Verification email sent.\nPlease verify your email before logging in.";
-
+        msg.style.color = "var(--success-color)";
+        msg.innerText = "Account created! Verification email sent. Please check your inbox.";
+        showToast("Verification email sent! Please verify before login.", "success");
     } catch (error) {
-
-        msg.style.color = "red";
-
-        switch (error.code) {
-
-            case "auth/email-already-in-use":
-                msg.innerText = "Email already exists.";
-                break;
-
-            case "auth/invalid-email":
-                msg.innerText = "Invalid email address.";
-                break;
-
-            case "auth/weak-password":
-                msg.innerText = "Password is too weak.";
-                break;
-
-            default:
-                msg.innerText = error.message;
-
-        }
-
+        msg.style.color = "var(--danger-color)";
+        msg.innerText = error.message;
+    } finally {
+        setAuthLoading(false);
     }
+}
 
-};
-
-window.login = async function () {
-
+async function handleLogin() {
     const email = document.getElementById("authEmail").value.trim();
     const password = document.getElementById("authPassword").value.trim();
     const msg = document.getElementById("authMessage");
 
     msg.innerText = "";
-
-    if (email === "" || password === "") {
-        msg.style.color = "red";
-        msg.innerText = "Enter email and password";
+    if (!email || !password) {
+        msg.style.color = "var(--danger-color)";
+        msg.innerText = "Please enter email and password.";
         return;
     }
 
+    setAuthLoading(true);
     try {
-
-        msg.style.color = "#5b5ce2";
-        msg.innerText = "Logging in...";
-
-        const userCredential =
-            await signInWithEmailAndPassword(
-                auth,
-                email,
-                password
-            );
-
+        const userCredential = await signInWithEmailAndPassword(auth, email, password);
         await userCredential.user.reload();
 
         if (!userCredential.user.emailVerified) {
-
             await signOut(auth);
-
-            msg.style.color = "red";
-            msg.innerText =
-                "Please verify your email before logging in.";
-
+            msg.style.color = "var(--danger-color)";
+            msg.innerText = "Please verify your email address before logging in.";
+            showToast("Please verify your email first.", "warning");
             return;
         }
 
-        msg.style.color = "green";
-        msg.innerText = "Login successful";
-
+        showToast("Login successful! Welcome back.", "success");
     } catch (error) {
-
-        msg.style.color = "red";
-
+        msg.style.color = "var(--danger-color)";
         switch (error.code) {
-
-            case "auth/user-not-found":
-                msg.innerText = "No account found.";
-                break;
-
-            case "auth/wrong-password":
-                msg.innerText = "Incorrect password.";
-                break;
-
-            case "auth/invalid-credential":
-                msg.innerText = "Invalid email or password.";
-                break;
-
-            default:
-                msg.innerText = error.message;
-
+            case "auth/user-not-found": msg.innerText = "No account found with this email."; break;
+            case "auth/wrong-password": msg.innerText = "Incorrect password."; break;
+            case "auth/invalid-credential": msg.innerText = "Invalid credentials. Double check email and password."; break;
+            default: msg.innerText = error.message;
         }
-
+    } finally {
+        setAuthLoading(false);
     }
+}
 
+function setAuthLoading(isLoading) {
+    const btn = document.getElementById("authSubmitBtn");
+    const text = btn.querySelector(".btn-text");
+    const spinner = btn.querySelector(".btn-spinner");
+
+    btn.disabled = isLoading;
+    if (isLoading) {
+        text.classList.add("hidden");
+        spinner.classList.remove("hidden");
+    } else {
+        text.classList.remove("hidden");
+        spinner.classList.add("hidden");
+    }
+}
+
+window.forgotPassword = async function () {
+    const email = document.getElementById("authEmail").value.trim();
+    if (!email) {
+        showToast("Please enter your email address first.", "warning");
+        return;
+    }
+    try {
+        await sendPasswordResetEmail(auth, email);
+        showToast("Password reset link sent to your email.", "success");
+    } catch (error) {
+        showToast(error.message, "danger");
+    }
 };
 
 window.logout = async function () {
+    const confirmed = await showConfirmModal("Logout", "Are you sure you want to log out?");
+    if (!confirmed) return;
+
     if (unsubscribeMedicines) unsubscribeMedicines();
     if (unsubscribeAppointments) unsubscribeAppointments();
     if (unsubscribeHistory) unsubscribeHistory();
@@ -336,54 +416,93 @@ window.logout = async function () {
     if (unsubscribeCaregiverAlerts) unsubscribeCaregiverAlerts();
     if (unsubscribeDoctors) unsubscribeDoctors();
     if (unsubscribeCaregiverViewAlerts) unsubscribeCaregiverViewAlerts();
+    if (unsubscribeAIChats) unsubscribeAIChats();
+    if (unsubscribeCaregiverRequests) unsubscribeCaregiverRequests();
+    if (unsubscribeAuthorizedCaregivers) unsubscribeAuthorizedCaregivers();
 
     await signOut(auth);
+    showToast("Logged out successfully.", "info");
 };
 
-onAuthStateChanged(auth, async function (user) {
+// Create User Document helper
+async function createUserDocument(user, nameValue) {
+    try {
+        const userRef = doc(db, "users", user.uid);
+        const userSnap = await getDoc(userRef);
+        if (!userSnap.exists()) {
+            await setDoc(userRef, {
+                name: nameValue || user.email.split("@")[0],
+                email: user.email,
+                caregiverCode: generateCaregiverCode(),
+                createdAt: serverTimestamp(),
+                settings: { theme: "light", sound: true, voice: true }
+            });
+        }
+    } catch (e) {
+        console.error("Error creating user doc:", e);
+    }
+}
 
+function generateCaregiverCode() {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let code = "";
+    for (let i = 0; i < 6; i++) code += chars.charAt(Math.floor(Math.random() * chars.length));
+    return "CG-" + code;
+}
+
+window.regenerateCaregiverCode = async function () {
+    if (!currentUser) return;
+    const confirmed = await showConfirmModal("Regenerate Code", "Generate a new caregiver code? (Valid for 24 hours). Existing linked caregivers will keep access.");
+    if (!confirmed) return;
+
+    try {
+        const regenCall = httpsCallable(functions, "regenerateCaregiverCode");
+        const res = await regenCall();
+        const newCode = res.data?.caregiverCode;
+        if (newCode) {
+            currentUserData.caregiverCode = newCode;
+            document.getElementById("caregiverCodeText").innerText = newCode;
+            document.getElementById("myCaregiverCode").innerText = newCode;
+            showToast("New secure caregiver code generated! (Valid 24h)", "success");
+        }
+    } catch (e) {
+        showToast("Failed to regenerate code: " + e.message, "danger");
+    }
+};
+
+// --------------------------------------------------------------------------
+// Auth State Observer
+// --------------------------------------------------------------------------
+onAuthStateChanged(auth, async (user) => {
     if (user) {
-
         currentUser = user;
-
         await user.reload();
 
         if (!user.emailVerified) {
-
             await signOut(auth);
-
-            alert("Please verify your email before accessing MediCare.");
-
             return;
         }
 
         await createUserDocument(user, "");
-
         const userRef = doc(db, "users", user.uid);
         const userSnap = await getDoc(userRef);
-        currentUserData = userSnap.data();
+        currentUserData = userSnap.data() || {};
 
         document.getElementById("authPage").classList.add("hidden");
         document.getElementById("appPage").classList.remove("hidden");
-
         document.body.classList.remove("pre-auth");
         document.getElementById("appPage").removeAttribute("inert");
         document.getElementById("appPage").removeAttribute("aria-hidden");
         document.getElementById("authPage").setAttribute("inert", "");
-        document.getElementById("authPage").setAttribute("aria-hidden", "true");
 
-        document.getElementById("welcomeText").innerText =
-            "Welcome, " + currentUserData.name + " 👋";
-
-        document.getElementById("caregiverCodeText").innerText =
-            currentUserData.caregiverCode;
-
-        document.getElementById("myCaregiverCode").innerText =
-            currentUserData.caregiverCode;
+        const greeting = `Welcome, ${currentUserData.name || "User"} 👋`;
+        document.getElementById("welcomeText").innerText = greeting;
+        document.getElementById("headerWelcomeText").innerText = greeting;
+        document.getElementById("caregiverCodeText").innerText = currentUserData.caregiverCode || "---";
+        document.getElementById("myCaregiverCode").innerText = currentUserData.caregiverCode || "---";
 
         loadTheme();
-
-        await migrateEmergencyContactIfNeeded();
+        initFCM(user);
         loadEmergencyContact();
 
         listenMedicines();
@@ -392,256 +511,292 @@ onAuthStateChanged(auth, async function (user) {
         listenFamilyMembers();
         listenCaregiverAlerts();
         listenDoctors();
+        listenAIChats();
+        listenCaregiverRequests();
+        listenAuthorizedCaregivers();
         loadLinkedPatients();
-
         loadPrescriptions();
     } else {
         currentUser = null;
-
-        if (unsubscribeCaregiverViewAlerts) unsubscribeCaregiverViewAlerts();
-        unsubscribeCaregiverViewAlerts = null;
-        viewedPatientId = null;
-        viewedPatientName = null;
-        caregiverAlertsFirstLoad = true;
-        caregiverViewAlertsFirstLoad = true;
-
         document.getElementById("authPage").classList.remove("hidden");
         document.getElementById("appPage").classList.add("hidden");
-
         document.body.classList.add("pre-auth");
         document.getElementById("appPage").setAttribute("inert", "");
-        document.getElementById("appPage").setAttribute("aria-hidden", "true");
         document.getElementById("authPage").removeAttribute("inert");
-        document.getElementById("authPage").removeAttribute("aria-hidden");
     }
 });
 
-window.scrollToSection = function (id) {
-    document.getElementById(id).scrollIntoView({ behavior: "smooth" });
+// --------------------------------------------------------------------------
+// Theme & Navigation Helpers
+// --------------------------------------------------------------------------
+window.toggleTheme = async function () {
+    document.body.classList.toggle("dark-mode");
+    const isDark = document.body.classList.contains("dark-mode");
+    const theme = isDark ? "dark" : "light";
+    document.getElementById("themeIcon").innerText = isDark ? "☀️" : "🌙";
+    localStorage.setItem("medicare_theme", theme);
+
+    if (currentUser) {
+        await updateDoc(doc(db, "users", currentUser.uid), { "settings.theme": theme });
+    }
 };
 
+function loadTheme() {
+    const savedTheme = localStorage.getItem("medicare_theme") || currentUserData?.settings?.theme;
+    if (savedTheme === "dark") {
+        document.body.classList.add("dark-mode");
+        document.getElementById("themeIcon").innerText = "☀️";
+    } else {
+        document.body.classList.remove("dark-mode");
+        document.getElementById("themeIcon").innerText = "🌙";
+    }
+}
+
+window.showPage = function (pageId) {
+    try {
+        document.querySelectorAll(".page-section").forEach(p => p.classList.add("hidden"));
+        document.querySelectorAll(".nav-item").forEach(item => item.classList.remove("active"));
+
+        const activePage = document.getElementById(pageId);
+        if (activePage) {
+            activePage.classList.remove("hidden");
+        } else {
+            throw new Error(`Page section #${pageId} not found.`);
+        }
+
+        const activeNav = document.getElementById(`nav-${pageId}`);
+        if (activeNav) activeNav.classList.add("active");
+
+        if (pageId === "dashboardPage") {
+            updateDashboardStats();
+        } else if (pageId === "analyticsPage") {
+            updateAnalyticsCharts();
+        } else if (pageId === "historyPage") {
+            const badge = document.getElementById("notificationBadge");
+            if (badge) {
+                badge.innerText = "0";
+                badge.classList.add("hidden");
+            }
+        }
+
+        window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (err) {
+        console.error("Navigation error:", err);
+        showToast("Navigation error: " + err.message, "danger");
+    }
+};
+
+// --------------------------------------------------------------------------
+// MEDICINES LOGIC
+// --------------------------------------------------------------------------
 window.addTimeField = function () {
+    const container = document.getElementById("timeInputs");
     const input = document.createElement("input");
     input.type = "time";
     input.className = "medicineTime";
-    document.getElementById("timeInputs").appendChild(input);
+    input.required = true;
+    container.appendChild(input);
 };
 
-window.addMedicine = async function () {
-    if (!currentUser) {
-        alert("Please login first");
+window.saveMedicine = async function (e) {
+    if (e) e.preventDefault();
+    if (!currentUser) return;
+
+    const editId = document.getElementById("editMedicineId").value;
+    const name = document.getElementById("medicineName").value.trim();
+    const dosage = document.getElementById("medicineDosage").value.trim();
+    
+    // Bug 4: Require dosage, do not default to "1" or "1 dose"
+    if (!dosage) {
+        showToast("Dosage is required (e.g. 500 mg, 1 tablet).", "warning");
+        const dInput = document.getElementById("medicineDosage");
+        if (dInput) {
+            dInput.classList.add("input-highlight-error");
+            dInput.focus();
+        }
         return;
     }
 
-    const editId = document.getElementById("editMedicineId").value || "";
-    const name = document.getElementById("medicineName").value.trim();
     const category = document.getElementById("medicineCategory").value;
+    const foodTiming = document.getElementById("medicineFoodTiming").value;
     const stock = Number(document.getElementById("medicineStock").value);
     const expiryDate = document.getElementById("medicineExpiry").value;
     const repeatDaily = document.getElementById("repeatDaily").checked;
-    const timeInputs = document.querySelectorAll(".medicineTime");
-
+    const notes = document.getElementById("medicineNotes").value.trim();
     const familySelect = document.getElementById("medicineFamilyMember");
 
-    let familyMemberId = "";
-    let familyMemberName = "Self";
+    let familyMemberId = familySelect ? familySelect.value : "";
+    let familyMemberName = familySelect && familySelect.selectedIndex >= 0 ? familySelect.options[familySelect.selectedIndex].text : "Self";
 
-    if (familySelect && familySelect.value !== "") {
-        familyMemberId = familySelect.value;
-        familyMemberName = familySelect.options[familySelect.selectedIndex].text;
-    }
-
-    if (name === "") {
-        alert("Enter medicine name");
-        return;
-    }
-
-    if (category === "") {
-        alert("Select medicine category");
-        return;
-    }
-
-    if (isNaN(stock) || stock < 0) {
-        alert("Enter valid stock count");
-        return;
-    }
-
+    const timeInputs = document.querySelectorAll(".medicineTime");
     let times = [];
-
     timeInputs.forEach(input => {
-        if (input.value !== "") {
-            times.push({
-                time: input.value,
-                taken: false,
-                missed: false,
-                notified: false
-            });
+        if (input.value) {
+            times.push({ time: input.value, taken: false, missed: false, notified: false });
         }
     });
 
     if (times.length === 0) {
-        alert("Add at least one time");
+        showToast("Please add at least one time for the medicine.", "warning");
         return;
     }
 
+    // Bug 4: Duplicate detection (same name, dose, time, and member) with confirmation
+    const lowerName = name.toLowerCase();
+    const primaryTime = times[0]?.time;
+    const isDuplicate = medicines.some(m => {
+        if (editId && m.id === editId) return false;
+        const sameName = m.name.toLowerCase() === lowerName;
+        const sameMember = (m.familyMemberId || "") === familyMemberId;
+        const sameDose = (m.dosage || "").toLowerCase() === dosage.toLowerCase();
+        const sameTime = m.times && m.times.some(t => t.time === primaryTime);
+        return sameName && sameMember && sameDose && sameTime;
+    });
+
+    if (isDuplicate) {
+        const allowDup = await showConfirmModal(
+            "Duplicate Medicine Detected",
+            `A medicine "${name}" (${dosage}) at ${primaryTime} already exists for ${familyMemberName}.\n\nDo you want to save another copy anyway?`
+        );
+        if (!allowDup) {
+            showToast("Cancelled saving duplicate medicine.", "info");
+            return;
+        }
+    }
+
+    // Bug 4: A medicine newly saved with a time earlier than now (like 08:00 today)
+    // must NOT instantly appear as Missed. Schedule it for the next occurrence (tomorrow).
+    const now = new Date();
+    const currentMins = now.getHours() * 60 + now.getMinutes();
+    let hasPastTimeToday = false;
+
+    if (!editId) {
+        times = times.map(t => {
+            const [h, m] = t.time.split(":").map(Number);
+            const doseMins = h * 60 + m;
+            if (doseMins <= currentMins) {
+                hasPastTimeToday = true;
+                return { ...t, scheduledForTomorrow: true, taken: false, missed: false, notified: false };
+            }
+            return t;
+        });
+    }
+
+    // Compute nextDueAt Date object (Firestore Timestamp) from first dose time
+    let nextDueAt = null;
+    if (times.length > 0) {
+        const [h, m] = times[0].time.split(":").map(Number);
+        const doseDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
+        if (doseDate.getTime() <= now.getTime()) {
+            doseDate.setDate(doseDate.getDate() + 1); // Next day if past
+        }
+        nextDueAt = doseDate;
+    }
+
     const medicineData = {
-        name,
-        category,
-        stock: stock || 0,
-        expiryDate,
-        repeatDaily,
-        times,
-        familyMemberId,
-        familyMemberName
+        name, dosage, category, foodTiming, stock: stock || 0, expiryDate, repeatDaily, times, notes, familyMemberId, familyMemberName, nextDueAt, enabled: true
     };
+
+    const submitBtn = document.querySelector("#medicinePage form button[type='submit']");
+    if (submitBtn) submitBtn.disabled = true;
 
     try {
         if (editId) {
-            await updateDoc(
-                doc(db, "users", currentUser.uid, "medicines", editId),
-                medicineData
-            );
-
-            alert("Medicine updated successfully ✅");
+            await updateDoc(doc(db, "users", currentUser.uid, "medicines", editId), medicineData);
+            showToast("Medicine updated successfully! ✅", "success");
         } else {
-            await addDoc(
-                collection(db, "users", currentUser.uid, "medicines"),
-                {
-                    ...medicineData,
-                    createdAt: serverTimestamp()
-                }
-            );
-
-            alert("Medicine saved successfully ✅");
+            await addDoc(collection(db, "users", currentUser.uid, "medicines"), {
+                ...medicineData, createdAt: serverTimestamp()
+            });
+            if (hasPastTimeToday) {
+                showToast(`Medicine saved! Scheduled for tomorrow (next occurrence) since today's time has already passed. ⏰`, "success", 6000);
+            } else {
+                showToast("Medicine saved successfully! ✅", "success");
+            }
         }
-
         resetMedicineForm();
-    } catch (error) {
-        alert("Error saving medicine: " + error.message);
-        console.log(error);
+    } catch (err) {
+        showToast("Error saving medicine: " + err.message, "danger");
+    } finally {
+        if (submitBtn) submitBtn.disabled = false;
     }
 };
 
-function resetMedicineForm() {
+window.resetMedicineForm = function () {
     document.getElementById("editMedicineId").value = "";
     document.getElementById("medicineName").value = "";
+    document.getElementById("medicineDosage").value = "";
     document.getElementById("medicineCategory").value = "";
     document.getElementById("medicineStock").value = "";
     document.getElementById("medicineExpiry").value = "";
-    document.getElementById("repeatDaily").checked = false;
-
-    const familySelect = document.getElementById("medicineFamilyMember");
-    if (familySelect) {
-        familySelect.value = "";
-    }
-
-    document.getElementById("timeInputs").innerHTML =
-        `<input type="time" class="medicineTime">`;
-}
+    document.getElementById("medicineNotes").value = "";
+    document.getElementById("repeatDaily").checked = true;
+    document.getElementById("cancelEditMedBtn").classList.add("hidden");
+    document.getElementById("timeInputs").innerHTML = `<input type="time" class="medicineTime" required>`;
+};
 
 function listenMedicines() {
-    const q = query(
-        collection(db, "users", currentUser.uid, "medicines"),
-        orderBy("createdAt", "desc")
-    );
-
+    const q = query(collection(db, "users", currentUser.uid, "medicines"), orderBy("createdAt", "desc"));
     unsubscribeMedicines = onSnapshot(q, snapshot => {
         medicines = [];
-
-        snapshot.forEach(docSnap => {
-            medicines.push({
-                id: docSnap.id,
-                ...docSnap.data()
-            });
-        });
-
+        snapshot.forEach(docSnap => medicines.push({ id: docSnap.id, ...docSnap.data() }));
         displayMedicines();
-        updateStats();
-        updateNextDose();
-        updateAnalytics();
+        updateDashboardStats();
+        updateAnalyticsCharts();
     });
-}
-
-function getExpiryBadge(medicine) {
-    if (!medicine.expiryDate) {
-        return `<span class="badge">Expiry: Not set</span>`;
-    }
-
-    const today = new Date();
-    const expiry = new Date(medicine.expiryDate);
-    const diffDays = Math.ceil((expiry - today) / (1000 * 60 * 60 * 24));
-
-    if (diffDays < 0) {
-        return `<span class="badge badge-danger">Expired</span>`;
-    }
-
-    if (diffDays <= 3) {
-        return `<span class="badge badge-warning">Expires in ${diffDays} day(s)</span>`;
-    }
-
-    return `<span class="badge">Expiry: ${medicine.expiryDate}</span>`;
 }
 
 function displayMedicines() {
     const list = document.getElementById("medicineList");
     const searchBox = document.getElementById("searchMedicine");
     const memberFilter = document.getElementById("medicineFilterMember")?.value || "";
-
     const searchValue = searchBox ? searchBox.value.toLowerCase() : "";
 
     if (!list) return;
 
-    list.innerHTML = "";
-
-    let filteredMedicines = medicines.filter(medicine => {
-        const matchesSearch =
-            medicine.name.toLowerCase().includes(searchValue) ||
-            medicine.category.toLowerCase().includes(searchValue) ||
-            (medicine.familyMemberName || "Self").toLowerCase().includes(searchValue);
-
-        const matchesMember =
-            memberFilter === "" ||
-            medicine.familyMemberId === memberFilter;
-
+    const filtered = medicines.filter(m => {
+        const matchesSearch = m.name.toLowerCase().includes(searchValue) || m.category.toLowerCase().includes(searchValue);
+        const matchesMember = memberFilter === "" || m.familyMemberId === memberFilter;
         return matchesSearch && matchesMember;
     });
 
-    if (filteredMedicines.length === 0) {
-        list.innerHTML = `<div class="medicine-card">No medicines found.</div>`;
+    if (filtered.length === 0) {
+        list.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-icon">💊</div>
+                <p class="empty-text">No medicines found.</p>
+                <button class="primary-btn" style="width:auto;" onclick="showPage('medicinePage')">+ Add First Medicine</button>
+            </div>
+        `;
         return;
     }
 
-    filteredMedicines.forEach(medicine => {
-        let doses = "";
-
-        medicine.times.forEach((dose, index) => {
-            let status = "Pending";
+    list.innerHTML = "";
+    filtered.forEach(m => {
+        let dosesHtml = "";
+        m.times.forEach((dose, index) => {
+            let statusBadge = `<span class="badge">Pending</span>`;
             let takenDisabled = "";
             let snoozeDisabled = "";
 
             if (dose.taken) {
-                status = "Taken ✅";
+                statusBadge = `<span class="badge badge-success">Taken ✅</span>`;
                 takenDisabled = "disabled";
                 snoozeDisabled = "disabled";
-            } else if (dose.missed || isMissed(dose.time)) {
-                status = "Missed ❌";
+            } else if (dose.scheduledForTomorrow) {
+                statusBadge = `<span class="badge" style="background:#e0e7ff;color:#4338ca;">Next: Tomorrow ⏰</span>`;
+            } else if (dose.missed || isMissed(dose.time, dose)) {
+                statusBadge = `<span class="badge badge-danger">Missed ❌</span>`;
             }
 
-            doses += `
+            dosesHtml += `
                 <div class="dose-row">
-                    <span>⏰ ${formatTime(dose.time)} - ${status}</span>
-
-                    <button class="taken-btn"
-                        onclick="markTaken('${medicine.id}', ${index})"
-                        ${takenDisabled}>
-                        Mark Taken
-                    </button>
-
-                    <button class="snooze-btn"
-                        onclick="snoozeMedicine('${medicine.id}', ${index})"
-                        ${snoozeDisabled}>
-                        Snooze
-                    </button>
+                    <span>⏰ ${formatTime(dose.time)} - ${statusBadge}</span>
+                    <div class="dose-actions">
+                        <button class="taken-btn" onclick="markTaken('${m.id}', ${index})" ${takenDisabled}>Mark Taken</button>
+                        <button class="secondary-btn" onclick="skipDose('${m.id}', ${index})" ${takenDisabled}>Skip</button>
+                        <button class="snooze-btn" onclick="snoozeMedicine('${m.id}', ${index})" ${snoozeDisabled}>Snooze</button>
+                    </div>
                 </div>
             `;
         });
@@ -650,1992 +805,2760 @@ function displayMedicines() {
             <div class="medicine-card">
                 <div class="medicine-header">
                     <div>
-                        <h3>${medicine.name}</h3>
-                        <span class="badge">${medicine.category}</span>
-                        <span class="badge">Stock: ${medicine.stock}</span>
-                        <span class="badge">${medicine.repeatDaily ? "Daily" : "One Time"}</span>
-                        <span class="badge">For: ${medicine.familyMemberName || "Self"}</span>
-                        ${getExpiryBadge(medicine)}
+                        <h3>${m.name} ${m.dosage ? `<small style="font-size:14px;color:var(--text-secondary);">(${m.dosage})</small>` : ""}</h3>
+                        <span class="badge">${m.category}</span>
+                        <span class="badge">Food: ${m.foodTiming || "After Food"}</span>
+                        <span class="badge ${m.stock <= 3 ? "badge-danger" : ""}">Stock: ${m.stock}</span>
+                        <span class="badge">For: ${m.familyMemberName || "Self"}</span>
                     </div>
-
                     <div>
-                        <button onclick="editMedicine('${medicine.id}')">Edit</button>
-                        <button onclick="refillStock('${medicine.id}')">Refill</button>
-                        <button class="delete-btn" onclick="deleteMedicine('${medicine.id}')">Delete</button>
+                        <button class="secondary-btn" style="width:auto;padding:6px 12px;font-size:13px;" onclick="editMedicine('${m.id}')">Edit</button>
+                        <button class="secondary-btn" style="width:auto;padding:6px 12px;font-size:13px;" onclick="refillStock('${m.id}')">Refill</button>
+                        <button class="delete-btn" style="width:auto;padding:6px 12px;font-size:13px;" onclick="deleteMedicine('${m.id}')">Delete</button>
                     </div>
                 </div>
-
-                ${doses}
+                ${m.notes ? `<p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">📝 Notes: ${m.notes}</p>` : ""}
+                ${dosesHtml}
             </div>
         `;
     });
 }
 
-window.displayMedicines = displayMedicines;
+window.editMedicine = function (id) {
+    const med = medicines.find(m => m.id === id);
+    if (!med) return;
 
-window.editMedicine = function (medicineId) {
-    const medicine = medicines.find(m => m.id === medicineId);
-    if (!medicine) return;
+    document.getElementById("editMedicineId").value = med.id;
+    document.getElementById("medicineName").value = med.name;
+    document.getElementById("medicineDosage").value = med.dosage || "";
+    document.getElementById("medicineCategory").value = med.category;
+    document.getElementById("medicineFoodTiming").value = med.foodTiming || "After Food";
+    document.getElementById("medicineStock").value = med.stock;
+    document.getElementById("medicineExpiry").value = med.expiryDate || "";
+    document.getElementById("repeatDaily").checked = med.repeatDaily;
+    document.getElementById("medicineNotes").value = med.notes || "";
+    document.getElementById("cancelEditMedBtn").classList.remove("hidden");
 
-    document.getElementById("editMedicineId").value = medicine.id;
-    document.getElementById("medicineName").value = medicine.name;
-    document.getElementById("medicineCategory").value = medicine.category;
-    document.getElementById("medicineStock").value = medicine.stock;
-    document.getElementById("medicineExpiry").value = medicine.expiryDate || "";
-    document.getElementById("repeatDaily").checked = medicine.repeatDaily;
-
-    const familySelect = document.getElementById("medicineFamilyMember");
-    if (familySelect) {
-        familySelect.value = medicine.familyMemberId || "";
-    }
-
-    document.getElementById("timeInputs").innerHTML = "";
-
-    medicine.times.forEach(dose => {
+    const timeInputs = document.getElementById("timeInputs");
+    timeInputs.innerHTML = "";
+    med.times.forEach(t => {
         const input = document.createElement("input");
         input.type = "time";
         input.className = "medicineTime";
-        input.value = dose.time;
-        document.getElementById("timeInputs").appendChild(input);
+        input.value = t.time;
+        input.required = true;
+        timeInputs.appendChild(input);
     });
 
-    scrollToSection("medicineSection");
+    window.scrollTo({ top: 0, behavior: "smooth" });
 };
 
-window.markTaken = async function (medicineId, index) {
-    const medicine = medicines.find(m => m.id === medicineId);
-    if (!medicine) return;
-
-    if (medicine.times[index].taken) {
-        alert("This dose is already marked as taken.");
+window.markTaken = async function (medId, index) {
+    const med = medicines.find(m => m.id === medId);
+    if (!med) return;
+    if (med.stock <= 0) {
+        showToast(`⚠ ${med.name} is out of stock! Please refill.`, "warning");
         return;
     }
 
-    if (medicine.stock <= 0) {
-        alert("⚠ Out of stock!\nPlease refill your medicine.");
-        return;
-    }
+    med.times[index].taken = true;
+    med.times[index].missed = false;
+    med.stock--;
 
-    medicine.times[index].taken = true;
-    medicine.times[index].missed = false;
-    medicine.stock--;
-
-    const key = medicineId + "_" + index;
-    delete snoozeMap[key];
-
-    await updateDoc(doc(db, "users", currentUser.uid, "medicines", medicineId), {
-        times: medicine.times,
-        stock: medicine.stock
-    });
-
+    await updateDoc(doc(db, "users", currentUser.uid, "medicines", medId), { times: med.times, stock: med.stock });
     await addDoc(collection(db, "users", currentUser.uid, "history"), {
-        medicineName: medicine.name,
-        time: medicine.times[index].time,
-        status: "Taken ✅",
-        createdAt: serverTimestamp()
+        medicineName: med.name, time: med.times[index].time, status: "Taken ✅", createdAt: serverTimestamp()
     });
 
-    if (medicine.stock <= 3) {
-        showNotification(
-            "💊 Low Stock Reminder",
-            medicine.name + " has only " + medicine.stock + " left."
-        );
-
-        alert("Low stock reminder: " + medicine.name + " has only " + medicine.stock + " left.");
-    }
+    clearSpeechRepeatTimer();
+    speakConfirmation("Medicine marked as taken.");
+    showToast(`Marked ${med.name} as taken!`, "success");
 };
 
-window.refillStock = async function (medicineId) {
-    const medicine = medicines.find(m => m.id === medicineId);
+window.skipDose = async function (medId, index) {
+    const med = medicines.find(m => m.id === medId);
+    if (!med) return;
 
-    if (!medicine) {
-        alert("Medicine not found");
-        return;
-    }
+    med.times[index].taken = false;
+    med.times[index].missed = true;
 
-    const newStock = prompt(
-        "Enter new stock quantity for " + medicine.name + ":",
-        medicine.stock
-    );
+    await updateDoc(doc(db, "users", currentUser.uid, "medicines", medId), { times: med.times });
+    await addDoc(collection(db, "users", currentUser.uid, "history"), {
+        medicineName: med.name, time: med.times[index].time, status: "Skipped ⚠️", createdAt: serverTimestamp()
+    });
 
-    if (newStock === null) return;
-
-    const stockNumber = Number(newStock);
-
-    if (isNaN(stockNumber) || stockNumber < 0) {
-        alert("Please enter a valid stock number");
-        return;
-    }
-
-    await updateDoc(
-        doc(db, "users", currentUser.uid, "medicines", medicineId),
-        { stock: stockNumber }
-    );
-
-    alert("Stock updated successfully ✅");
+    clearSpeechRepeatTimer();
+    showToast(`Skipped dose for ${med.name}`, "info");
 };
 
-window.deleteMedicine = async function (medicineId) {
-    if (!confirm("Delete this medicine?")) return;
+window.snoozeMedicine = async function (medId, index) {
+    const med = medicines.find(m => m.id === medId);
+    if (!med) return;
 
-    await deleteDoc(doc(db, "users", currentUser.uid, "medicines", medicineId));
-};
-
-window.snoozeMedicine = function (medicineId, index) {
-    const medicine = medicines.find(m => m.id === medicineId);
-    if (!medicine) return;
-
-    if (medicine.times[index].taken) {
-        alert("This medicine is already taken.");
-        return;
-    }
-
-    const key = medicineId + "_" + index;
-    snoozeMap[key] = Date.now() + 2 * 60 * 1000;
-
-    alert(medicine.name + " snoozed for 2 minutes.");
-};
-
-function updateStats() {
-    let total = medicines.length;
-    let taken = 0;
-    let pending = 0;
-    let missed = 0;
-
-    medicines.forEach(medicine => {
-        medicine.times.forEach(dose => {
-            if (dose.taken) taken++;
-            else if (dose.missed || isMissed(dose.time)) missed++;
-            else pending++;
+    const snoozeTime = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    try {
+        await updateDoc(doc(db, "users", currentUser.uid, "medicines", medId), {
+            nextDueAt: snoozeTime
         });
-    });
+        clearSpeechRepeatTimer();
+        speakConfirmation("Reminder snoozed for 10 minutes.");
+        showToast(`Medicine snoozed for 10 minutes ⏰ (Server nextDueAt updated)`, "info");
+    } catch (e) {
+        showToast("Failed to snooze medicine: " + e.message, "danger");
+    }
+};
 
-    document.getElementById("totalMedicines").innerText = total;
-    document.getElementById("takenMedicines").innerText = taken;
-    document.getElementById("pendingMedicines").innerText = pending;
-    document.getElementById("missedMedicines").innerText = missed;
 
-    const familyCountBox = document.getElementById("familyCount");
-    if (familyCountBox) {
-        familyCountBox.innerText = familyMembers.length;
+window.refillStock = async function (medId) {
+    const med = medicines.find(m => m.id === medId);
+    if (!med) return;
+    const newStockStr = prompt(`Refill stock count for ${med.name}:`, med.stock + 10);
+    if (newStockStr === null) return;
+    const newStock = Number(newStockStr);
+    if (isNaN(newStock) || newStock < 0) return;
+
+    await updateDoc(doc(db, "users", currentUser.uid, "medicines", medId), { stock: newStock });
+    showToast(`Stock updated for ${med.name}!`, "success");
+};
+
+window.deleteMedicine = async function (medId) {
+    const confirmed = await showConfirmModal("Delete Medicine", "Are you sure you want to delete this medicine record?");
+    if (!confirmed) return;
+
+    await deleteDoc(doc(db, "users", currentUser.uid, "medicines", medId));
+    showToast("Medicine deleted.", "info");
+};
+
+// --------------------------------------------------------------------------
+// FAMILY MEMBERS LOGIC
+// --------------------------------------------------------------------------
+window.addFamilyMember = async function (e) {
+    if (e) e.preventDefault();
+    if (!currentUser) return;
+
+    const name = document.getElementById("familyMemberName").value.trim();
+    const relation = document.getElementById("familyMemberRelation").value;
+
+    if (!name || !relation) {
+        showToast("Please enter name and select relation.", "warning");
+        return;
     }
 
-    const totalDoses = taken + pending + missed;
-    const percent = totalDoses === 0 ? 0 : Math.round((taken / totalDoses) * 100);
-
-    document.getElementById("progressFill").style.width = percent + "%";
-    document.getElementById("progressText").innerText = percent + "% completed";
-
-    drawWeeklyChart();
-    updateAnalytics();
-}
-
-function updateNextDose() {
-    const box = document.getElementById("nextDoseText");
-    if (!box) return;
-
-    const now = new Date();
-    const currentMinutes = now.getHours() * 60 + now.getMinutes();
-
-    let next = null;
-
-    medicines.forEach(medicine => {
-        medicine.times.forEach(dose => {
-            if (!dose.taken && !dose.missed) {
-                const [h, m] = dose.time.split(":");
-                const mins = Number(h) * 60 + Number(m);
-
-                if (mins >= currentMinutes) {
-                    if (!next || mins < next.mins) {
-                        next = {
-                            name: medicine.name,
-                            time: dose.time,
-                            mins
-                        };
-                    }
-                }
-            }
+    try {
+        await addDoc(collection(db, "users", currentUser.uid, "familyMembers"), {
+            name, relation, createdAt: serverTimestamp()
         });
-    });
-
-    if (next) {
-        box.innerText = next.name + " at " + formatTime(next.time);
-    } else {
-        box.innerText = "No upcoming dose today 🎉";
+        document.getElementById("familyMemberName").value = "";
+        document.getElementById("familyMemberRelation").value = "";
+        showToast("Family member added! ✅", "success");
+    } catch (err) {
+        showToast(err.message, "danger");
     }
-}
+};
 
-function isMissed(time) {
-    const [h, m] = time.split(":");
-    const medicineMinutes = Number(h) * 60 + Number(m);
-
-    const now = new Date();
-    const currentMinutes = now.getHours() * 60 + now.getMinutes();
-
-    return currentMinutes > medicineMinutes + 30;
-
-    // For testing, use:
-    // return currentMinutes > medicineMinutes + 1;
-}
-
-function formatTime(time) {
-    const [h, m] = time.split(":");
-    const date = new Date();
-    date.setHours(h);
-    date.setMinutes(m);
-
-    return date.toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit"
+function listenFamilyMembers() {
+    const q = query(collection(db, "users", currentUser.uid, "familyMembers"), orderBy("createdAt", "desc"));
+    unsubscribeFamilyMembers = onSnapshot(q, snapshot => {
+        familyMembers = [];
+        snapshot.forEach(docSnap => familyMembers.push({ id: docSnap.id, ...docSnap.data() }));
+        displayFamilyMembers();
+        updateFamilyDropdowns();
     });
 }
 
-window.addAppointment = async function () {
-    if (!currentUser) {
-    alert("Please login first.");
-    return;
+function displayFamilyMembers() {
+    const list = document.getElementById("familyMemberList");
+    const search = document.getElementById("familySearch")?.value.toLowerCase() || "";
+    if (!list) return;
+
+    const filtered = familyMembers.filter(m => m.name.toLowerCase().includes(search) || m.relation.toLowerCase().includes(search));
+    if (filtered.length === 0) {
+        list.innerHTML = `<div class="empty-state"><p class="empty-text">No family members added yet.</p></div>`;
+        return;
+    }
+
+    list.innerHTML = "";
+    filtered.forEach(m => {
+        list.innerHTML += `
+            <div class="medicine-card" style="display:flex;justify-content:space-between;align-items:center;">
+                <div>
+                    <h3>👤 ${m.name}</h3>
+                    <span class="badge">${m.relation}</span>
+                </div>
+                <button class="delete-btn" style="width:auto;padding:6px 14px;" onclick="deleteFamilyMember('${m.id}')">Delete</button>
+            </div>
+        `;
+    });
 }
+
+function updateFamilyDropdowns() {
+    const select = document.getElementById("medicineFamilyMember");
+    const filterSelect = document.getElementById("medicineFilterMember");
+
+    if (select) {
+        select.innerHTML = `<option value="">👤 Self</option>`;
+        familyMembers.forEach(m => select.innerHTML += `<option value="${m.id}">${m.name} (${m.relation})</option>`);
+    }
+    if (filterSelect) {
+        filterSelect.innerHTML = `<option value="">All Members</option>`;
+        familyMembers.forEach(m => filterSelect.innerHTML += `<option value="${m.id}">${m.name} (${m.relation})</option>`);
+    }
+    document.getElementById("familyCount").innerText = familyMembers.length;
+}
+
+window.deleteFamilyMember = async function (id) {
+    const confirmed = await showConfirmModal("Delete Member", "Delete this family member?");
+    if (!confirmed) return;
+    await deleteDoc(doc(db, "users", currentUser.uid, "familyMembers", id));
+    showToast("Family member removed.", "info");
+};
+
+// --------------------------------------------------------------------------
+// APPOINTMENTS & DOCTORS LOGIC
+// --------------------------------------------------------------------------
+window.addAppointment = async function (e) {
+    if (e) e.preventDefault();
+    if (!currentUser) return;
+
     const doctor = document.getElementById("doctorName").value.trim();
     const hospital = document.getElementById("hospitalName").value.trim();
     const date = document.getElementById("appointmentDate").value;
     const time = document.getElementById("appointmentTime").value;
     const notes = document.getElementById("appointmentNotes").value.trim();
 
-    if (doctor === "" || date === "" || time === "") {
-        alert("Enter doctor, date and time");
-        return;
+    try {
+        await addDoc(collection(db, "users", currentUser.uid, "appointments"), {
+            doctor, hospital, date, time, notes, notified: false, createdAt: serverTimestamp()
+        });
+        document.getElementById("doctorName").value = "";
+        document.getElementById("hospitalName").value = "";
+        document.getElementById("appointmentDate").value = "";
+        document.getElementById("appointmentTime").value = "";
+        document.getElementById("appointmentNotes").value = "";
+        showToast("Doctor appointment scheduled! 📅", "success");
+    } catch (err) {
+        showToast(err.message, "danger");
     }
-
-    await addDoc(collection(db, "users", currentUser.uid, "appointments"), {
-        doctor,
-        hospital,
-        date,
-        time,
-        notes,
-        notified: false,
-        createdAt: serverTimestamp()
-    });
-
-    document.getElementById("doctorName").value = "";
-    document.getElementById("hospitalName").value = "";
-    document.getElementById("appointmentDate").value = "";
-    document.getElementById("appointmentTime").value = "";
-    document.getElementById("appointmentNotes").value = "";
 };
 
 function listenAppointments() {
-    const q = query(
-        collection(db, "users", currentUser.uid, "appointments"),
-        orderBy("createdAt", "desc")
-    );
-
+    const q = query(collection(db, "users", currentUser.uid, "appointments"), orderBy("createdAt", "desc"));
     unsubscribeAppointments = onSnapshot(q, snapshot => {
         appointments = [];
-
-        const list = document.getElementById("appointmentList");
-        list.innerHTML = "";
-
-        snapshot.forEach(docSnap => {
-            const app = {
-                id: docSnap.id,
-                ...docSnap.data()
-            };
-
-            appointments.push(app);
-
-            list.innerHTML += `
-                <div class="appointment-card">
-                    <h3>${app.doctor}</h3>
-                    <p>${app.hospital}</p>
-                    <p>${app.date} - ${formatTime(app.time)}</p>
-                    <p>${app.notes || ""}</p>
-                </div>
-            `;
-        });
-
-        updateAnalytics();
+        snapshot.forEach(docSnap => appointments.push({ id: docSnap.id, ...docSnap.data() }));
+        displayAppointments();
     });
 }
 
-function listenHistory() {
-    const q = query(
-        collection(db, "users", currentUser.uid, "history"),
-        orderBy("createdAt", "desc")
-    );
-
-    unsubscribeHistory = onSnapshot(q, snapshot => {
-        historyItems = [];
-
-        const list = document.getElementById("historyList");
-        list.innerHTML = "";
-
-        snapshot.forEach(docSnap => {
-            const h = {
-                id: docSnap.id,
-                ...docSnap.data()
-            };
-
-            historyItems.push(h);
-
-            list.innerHTML += `
-                <div class="history-card">
-                    ${h.status} ${h.medicineName} - ${formatTime(h.time)}
-                </div>
-            `;
-        });
-
-        drawWeeklyChart();
-        updateAnalytics();
-    });
-}
-
-function drawWeeklyChart() {
-    const canvas = document.getElementById("weeklyChart");
-    if (!canvas) return;
-
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    const takenCount = historyItems.filter(h => h.status === "Taken ✅").length;
-    const missedCount = historyItems.filter(h => h.status === "Missed ❌").length;
-
-    ctx.font = "16px Arial";
-
-    ctx.fillStyle = "#22c55e";
-    ctx.fillRect(80, 80, takenCount * 30, 35);
-    ctx.fillText("Taken: " + takenCount, 80, 70);
-
-    ctx.fillStyle = "#ef4444";
-    ctx.fillRect(80, 150, missedCount * 30, 35);
-    ctx.fillText("Missed: " + missedCount, 80, 140);
-
-    ctx.fillStyle = "#1f2937";
-    ctx.fillText("Weekly Taken vs Missed", 80, 30);
-}
-
-// Enter a patient's caregiver code -> creates a persistent, security-rule
-// verified authorizedCaregivers/{myUid} document under that patient, then
-// opens the real-time patient view. The code is only ever checked at the
-// moment of linking (server-side, in firestore.rules) — after that the
-// relationship document itself is what grants access, so the code is not
-// a standing password.
-window.linkAndViewPatient = async function () {
-    if (!currentUser) {
-        alert("Please login first");
-        return;
-    }
-
-    const codeInput = document.getElementById("caregiverSearchCode");
-    const code = codeInput.value.trim();
-    const box = document.getElementById("caregiverData");
-
-    if (code === "") {
-        alert("Enter caregiver code");
-        return;
-    }
-
-    box.innerHTML = `<div class="medicine-card">Looking up patient...</div>`;
-
-    try {
-        const q = query(
-            collection(db, "users"),
-            where("caregiverCode", "==", code)
-        );
-
-        const snap = await getDocs(q);
-
-        if (snap.empty) {
-            box.innerHTML = `<div class="medicine-card">No patient found with this code.</div>`;
-            return;
-        }
-
-        const patientDoc = snap.docs[0];
-        const patientId = patientDoc.id;
-        const patient = patientDoc.data();
-
-        if (patientId === currentUser.uid) {
-            box.innerHTML = `<div class="medicine-card">You can't link yourself as your own caregiver.</div>`;
-            return;
-        }
-
-        await setDoc(
-            doc(db, "users", patientId, "authorizedCaregivers", currentUser.uid),
-            {
-                caregiverId: currentUser.uid,
-                caregiverName: currentUserData?.name || "Caregiver",
-                linkCode: code,
-                linkedAt: serverTimestamp()
-            }
-        );
-
-        await setDoc(
-            doc(db, "users", currentUser.uid, "linkedPatients", patientId),
-            {
-                patientId,
-                patientName: patient.name || "Patient",
-                linkedAt: serverTimestamp()
-            },
-            { merge: true }
-        );
-
-        codeInput.value = "";
-        await viewPatient(patientId, patient.name || "Patient");
-        loadLinkedPatients();
-
-    } catch (e) {
-        console.error("Linking to patient failed", e);
-        box.innerHTML = `<div class="medicine-card">❌ Could not link to this patient. Double-check the code and try again.</div>`;
-    }
-};
-
-// Shows the "My Patients" quick-access list (previously linked patients).
-async function loadLinkedPatients() {
-    const list = document.getElementById("linkedPatientsList");
-    if (!list || !currentUser) return;
-
-    try {
-        const snap = await getDocs(collection(db, "users", currentUser.uid, "linkedPatients"));
-
-        if (snap.empty) {
-            list.innerHTML = `<p style="font-size:13px;color:#6b7280;">No linked patients yet. Enter a caregiver code below to link one.</p>`;
-            return;
-        }
-
-        let html = "";
-        snap.forEach(docSnap => {
-            const p = docSnap.data();
-            html += `
-                <button class="secondary-btn" style="width:auto;margin:4px 6px 4px 0;"
-                    onclick="viewPatient('${p.patientId}', '${(p.patientName || "Patient").replace(/'/g, "\\'")}')">
-                    👤 ${p.patientName || "Patient"}
-                </button>
-            `;
-        });
-        list.innerHTML = html;
-    } catch (e) {
-        console.error("Could not load linked patients", e);
-    }
-}
-
-// Opens the real-time view for an already-linked patient: their medicines
-// list plus a live SOS/missed-dose alert feed (onSnapshot — no polling).
-async function viewPatient(patientId, patientName) {
-    const box = document.getElementById("caregiverData");
-    if (!box) return;
-
-    if (unsubscribeCaregiverViewAlerts) {
-        unsubscribeCaregiverViewAlerts();
-        unsubscribeCaregiverViewAlerts = null;
-    }
-
-    viewedPatientId = patientId;
-    viewedPatientName = patientName;
-    caregiverViewAlertsFirstLoad = true;
-
-    box.innerHTML = `<div class="medicine-card">Loading patient data...</div>`;
-
-    try {
-        const medsSnap = await getDocs(collection(db, "users", patientId, "medicines"));
-
-        let html = `<h3>Patient: ${patientName}</h3>`;
-
-        if (medsSnap.empty) {
-            html += `<p>No medicines added yet.</p>`;
-        } else {
-            medsSnap.forEach(docSnap => {
-                const m = docSnap.data();
-                html += `
-                    <div class="medicine-card">
-                        <h3>${m.name}</h3>
-                        <p>${m.category}</p>
-                        <p>Stock: ${m.stock}</p>
-                        <p>For: ${m.familyMemberName || "Self"}</p>
-                    </div>
-                `;
-            });
-        }
-
-        box.innerHTML = html;
-    } catch (e) {
-        console.error("Could not load patient medicines", e);
-        box.innerHTML = `<div class="medicine-card">❌ Could not load this patient's data. You may no longer be an authorized caregiver.</div>`;
-        return;
-    }
-
-    const alertsQuery = query(
-        collection(db, "users", patientId, "caregiverAlerts"),
-        orderBy("createdAt", "desc")
-    );
-
-    unsubscribeCaregiverViewAlerts = onSnapshot(alertsQuery, snapshot => {
-        if (!caregiverViewAlertsFirstLoad) {
-            snapshot.docChanges().forEach(change => {
-                if (change.type === "added") {
-                    const a = change.doc.data();
-                    if (a.type === "SOS") {
-                        showNotification(
-                            "🚨 SOS from " + (a.patientName || patientName),
-                            a.message || "Emergency SOS triggered"
-                        );
-                    } else if (a.type === "MISSED_DOSE") {
-                        showNotification(
-                            "⚠ Missed Dose — " + (a.patientName || patientName),
-                            a.message || ""
-                        );
-                    }
-                }
-            });
-        }
-        caregiverViewAlertsFirstLoad = false;
-
-        const alerts = [];
-        snapshot.forEach(docSnap => alerts.push({ id: docSnap.id, ...docSnap.data() }));
-        renderCaregiverViewAlerts(alerts, patientId);
-    }, error => {
-        console.error("Caregiver alert listener error", error);
-    });
-}
-window.viewPatient = viewPatient;
-
-function alertStatusBadge(status) {
-    const s = (status || "ACTIVE").toUpperCase();
-    if (s === "ACTIVE") return `<span class="badge badge-danger">ACTIVE</span>`;
-    if (s === "ACKNOWLEDGED") return `<span class="badge badge-warning">✓ ACKNOWLEDGED</span>`;
-    return `<span class="badge">RESOLVED</span>`;
-}
-
-function renderCaregiverViewAlerts(alerts, patientId) {
-    const list = document.getElementById("caregiverViewAlertList");
+function displayAppointments() {
+    const list = document.getElementById("appointmentList");
     if (!list) return;
 
-    if (alerts.length === 0) {
-        list.innerHTML = `<div class="medicine-card">No alerts for this patient yet.</div>`;
+    if (appointments.length === 0) {
+        list.innerHTML = `<div class="empty-state"><p class="empty-text">No upcoming doctor appointments.</p></div>`;
         return;
     }
-
-    let html = "";
-
-    alerts.forEach(a => {
-        const status = (a.status || "ACTIVE").toUpperCase();
-        const time = a.createdAt?.toDate
-            ? a.createdAt.toDate().toLocaleString([], { dateStyle: "medium", timeStyle: "short" })
-            : "Just now";
-
-        const ackButton = status === "ACTIVE"
-            ? `<button onclick="acknowledgeAlert('${patientId}','${a.id}')">Acknowledge Alert</button>`
-            : "";
-
-        const resolveButton = status === "ACKNOWLEDGED"
-            ? `<button onclick="resolveAlert('${patientId}','${a.id}')">Mark Resolved</button>`
-            : "";
-
-        if (a.type === "SOS") {
-            const callAction = a.emergencyContactPhone && a.emergencyContactPhone !== "Not set"
-                ? `<a href="tel:${a.emergencyContactPhone}">📞 Call Emergency Contact</a>`
-                : "";
-
-            html += `
-                <div class="alert-card sos-alert ${status === "ACTIVE" ? "sos-active" : ""}">
-                    <h3>🚨 SOS EMERGENCY</h3>
-                    <p><b>Patient:</b> ${a.patientName || viewedPatientName}</p>
-                    <p><b>Time:</b> ${time}</p>
-                    <p>${a.message || "Emergency SOS triggered"}</p>
-                    <p><b>Emergency Contact:</b><br>${a.emergencyContactName || "Not set"}<br>${a.emergencyContactPhone || "Not set"}</p>
-                    <p>${alertStatusBadge(status)}</p>
-                    ${callAction}
-                    ${ackButton}
-                    ${resolveButton}
-                </div>
-            `;
-        } else if (a.type === "MISSED_DOSE") {
-            html += `
-                <div class="alert-card">
-                    <h3>⚠ Missed Dose</h3>
-                    <p><b>Patient:</b> ${a.patientName || viewedPatientName}</p>
-                    <p><b>Time:</b> ${time}</p>
-                    <p>${a.message}</p>
-                    <p>${alertStatusBadge(status)}</p>
-                    ${ackButton}
-                    ${resolveButton}
-                </div>
-            `;
-        } else {
-            html += `
-                <div class="alert-card">
-                    <h3>${a.message || "Alert"}</h3>
-                    <p><b>Time:</b> ${time}</p>
-                    ${ackButton}
-                </div>
-            `;
-        }
-    });
-
-    list.innerHTML = html;
-}
-
-// Only an authorized caregiver or the patient themselves can call these
-// (enforced server-side by firestore.rules — only status fields may change).
-window.acknowledgeAlert = async function (patientId, alertId) {
-    if (!currentUser) return;
-
-    try {
-        await updateDoc(
-            doc(db, "users", patientId, "caregiverAlerts", alertId),
-            {
-                status: "ACKNOWLEDGED",
-                acknowledgedBy: currentUser.uid,
-                acknowledgedByName: currentUserData?.name || "Caregiver",
-                acknowledgedAt: serverTimestamp()
-            }
-        );
-    } catch (e) {
-        console.error("Could not acknowledge alert", e);
-        alert("Could not acknowledge this alert. Please try again.");
-    }
-};
-
-window.resolveAlert = async function (patientId, alertId) {
-    if (!currentUser) return;
-
-    try {
-        await updateDoc(
-            doc(db, "users", patientId, "caregiverAlerts", alertId),
-            {
-                status: "RESOLVED",
-                resolvedAt: serverTimestamp()
-            }
-        );
-    } catch (e) {
-        console.error("Could not resolve alert", e);
-        alert("Could not update this alert. Please try again.");
-    }
-};
-
-function checkAppointmentReminders(currentDate, currentTime) {
-    appointments.forEach(async app => {
-        if (
-            app.date === currentDate &&
-            app.time === currentTime &&
-            !app.notified
-        ) {
-            showNotification(
-                "📅 Appointment Reminder",
-                "Appointment with " + app.doctor
-            );
-
-            speakText("You have an appointment with " + app.doctor);
-
-            await updateDoc(
-                doc(db, "users", currentUser.uid, "appointments", app.id),
-                {
-                    notified: true
-                }
-            );
-        }
-    });
-}
-
-function checkExpiryAlerts() {
-    const today = new Date();
-
-    medicines.forEach(medicine => {
-        if (!medicine.expiryDate) return;
-
-        const expiry = new Date(medicine.expiryDate);
-        const diffDays = Math.ceil((expiry - today) / (1000 * 60 * 60 * 24));
-
-        const key = medicine.id + "_" + diffDays;
-
-        if (expiryAlertMap[key]) return;
-
-        if (diffDays === 3) {
-            expiryAlertMap[key] = true;
-            showNotification("⚠ Medicine Expiry Alert", medicine.name + " expires in 3 days.");
-        }
-
-        if (diffDays === 0) {
-            expiryAlertMap[key] = true;
-            showNotification("🚨 Medicine Expires Today", medicine.name + " expires today.");
-        }
-
-        if (diffDays < 0) {
-            expiryAlertMap[key] = true;
-            showNotification("❌ Medicine Expired", medicine.name + " is expired. Do not use without doctor advice.");
-        }
-    });
-}
-
-async function checkMissedDoseAlerts() {
-    for (let medicine of medicines) {
-        for (let index = 0; index < medicine.times.length; index++) {
-            const dose = medicine.times[index];
-
-            if (isMissed(dose.time) && !dose.taken && !dose.missed) {
-                medicine.times[index].missed = true;
-
-                const message =
-                    (medicine.familyMemberName || "Self") +
-                    " missed " +
-                    medicine.name +
-                    " at " +
-                    formatTime(dose.time);
-
-                await updateDoc(
-                    doc(db, "users", currentUser.uid, "medicines", medicine.id),
-                    {
-                        times: medicine.times
-                    }
-                );
-
-                await addDoc(
-                    collection(db, "users", currentUser.uid, "caregiverAlerts"),
-                    {
-                        patientId: currentUser.uid,
-                        patientName: currentUserData?.name || "Patient",
-                        type: "MISSED_DOSE",
-                        medicineName: medicine.name,
-                        familyMemberName: medicine.familyMemberName || "Self",
-                        time: dose.time,
-                        message,
-                        status: "ACTIVE",
-                        createdAt: serverTimestamp()
-                    }
-                );
-
-                await addDoc(
-                    collection(db, "users", currentUser.uid, "history"),
-                    {
-                        medicineName: medicine.name,
-                        time: dose.time,
-                        status: "Missed ❌",
-                        createdAt: serverTimestamp()
-                    }
-                );
-
-                showNotification("⚠ Missed Dose Alert", message);
-                alert("⚠ Missed Dose Alert\n\n" + message);
-            }
-        }
-    }
-}
-
-function listenCaregiverAlerts() {
-    const q = query(
-        collection(db, "users", currentUser.uid, "caregiverAlerts"),
-        orderBy("createdAt", "desc")
-    );
-
-    caregiverAlertsFirstLoad = true;
-
-    unsubscribeCaregiverAlerts = onSnapshot(q, snapshot => {
-        caregiverAlerts = [];
-
-        snapshot.forEach(docSnap => {
-            caregiverAlerts.push({
-                id: docSnap.id,
-                ...docSnap.data()
-            });
-        });
-
-        caregiverAlertsFirstLoad = false;
-        displayCaregiverAlerts();
-    });
-}
-
-// Shows the current user's OWN alerts (their own missed doses and SOS
-// history), distinguishing alert types per REQUIREMENT 13, with the live
-// status of each (ACTIVE / ACKNOWLEDGED / RESOLVED).
-function displayCaregiverAlerts() {
-    const list = document.getElementById("caregiverAlertList");
-    if (!list) return;
 
     list.innerHTML = "";
-
-    if (caregiverAlerts.length === 0) {
-        list.innerHTML = `<div class="medicine-card">No alerts yet.</div>`;
-        return;
-    }
-
-    caregiverAlerts.forEach(a => {
-        const status = (a.status || "ACTIVE").toUpperCase();
-        const time = a.createdAt?.toDate
-            ? a.createdAt.toDate().toLocaleString([], { dateStyle: "medium", timeStyle: "short" })
-            : "Just now";
-
-        const resolveButton = (a.type === "SOS" && status === "ACKNOWLEDGED")
-            ? `<button onclick="resolveAlert('${currentUser.uid}','${a.id}')">Mark Resolved</button>`
-            : "";
-
-        if (a.type === "SOS") {
-            list.innerHTML += `
-                <div class="alert-card sos-alert ${status === "ACTIVE" ? "sos-active" : ""}">
-                    <h3>🚨 SOS EMERGENCY</h3>
-                    <p><b>Time:</b> ${time}</p>
-                    <p>${a.message || "Emergency SOS triggered"}</p>
-                    <p>${alertStatusBadge(status)}</p>
-                    ${a.acknowledgedByName ? `<p style="font-size:13px;">Acknowledged by ${a.acknowledgedByName}</p>` : ""}
-                    ${resolveButton}
-                </div>
-            `;
-        } else if (a.type === "MISSED_DOSE") {
-            list.innerHTML += `
-                <div class="alert-card">
-                    <h3>⚠ Missed Dose</h3>
-                    <p>${a.message}</p>
-                    <p>${alertStatusBadge(status)}</p>
-                </div>
-            `;
-        } else {
-            // Legacy alerts created before this update (no `type` field).
-            list.innerHTML += `
-                <div class="alert-card">
-                    <h3>⚠ Missed Dose</h3>
-                    <p>${a.message}</p>
-                </div>
-            `;
-        }
-    });
-}
-
-window.toggleTheme = async function () {
-    document.body.classList.toggle("dark-mode");
-
-    const theme = document.body.classList.contains("dark-mode")
-        ? "dark"
-        : "light";
-
-    if (currentUser) {
-        await updateDoc(doc(db, "users", currentUser.uid), {
-            "settings.theme": theme
-        });
-    }
-};
-
-function loadTheme() {
-    if (currentUserData?.settings?.theme === "dark") {
-        document.body.classList.add("dark-mode");
-    } else {
-        document.body.classList.remove("dark-mode");
-    }
-}
-
-setInterval(async () => {
-    if (!currentUser) return;
-
-    const now = new Date();
-
-    const currentDate =
-        now.getFullYear() + "-" +
-        String(now.getMonth() + 1).padStart(2, "0") + "-" +
-        String(now.getDate()).padStart(2, "0");
-
-    const currentTime =
-        now.getHours().toString().padStart(2, "0") +
-        ":" +
-        now.getMinutes().toString().padStart(2, "0");
-
-    checkAppointmentReminders(currentDate, currentTime);
-    checkExpiryAlerts();
-    await checkMissedDoseAlerts();
-
-    for (let medicine of medicines) {
-        for (let index = 0; index < medicine.times.length; index++) {
-            const dose = medicine.times[index];
-            const key = medicine.id + "_" + index;
-            const snoozedUntil = snoozeMap[key];
-
-            if (
-                currentTime === dose.time &&
-                !dose.taken &&
-                !dose.notified &&
-                !snoozedUntil
-            ) {
-                showNotification("💊 Medicine Reminder", "Take " + medicine.name);
-                speakText("Take your medicine " + medicine.name);
-
-                medicine.times[index].notified = true;
-
-                await updateDoc(
-                    doc(db, "users", currentUser.uid, "medicines", medicine.id),
-                    { times: medicine.times }
-                );
-            }
-
-            if (
-                snoozedUntil &&
-                Date.now() >= snoozedUntil &&
-                !dose.taken
-            ) {
-                showNotification("💊 Snooze Reminder", "Take " + medicine.name);
-                speakText("Take your medicine " + medicine.name);
-                alert("Reminder: Take " + medicine.name);
-                delete snoozeMap[key];
-            }
-
-            if (currentTime !== dose.time && dose.notified) {
-                medicine.times[index].notified = false;
-
-                await updateDoc(
-                    doc(db, "users", currentUser.uid, "medicines", medicine.id),
-                    { times: medicine.times }
-                );
-            }
-        }
-    }
-
-    updateStats();
-    updateNextDose();
-    updateAnalytics();
-}, 1000);
-
-window.startWaterReminder = function () {
-
-    if (waterReminderStarted) {
-        alert("Water reminder is already running.");
-        return;
-    }
-
-    const minutes = Number(document.getElementById("waterInterval").value);
-
-    waterReminderStarted = true;
-
-    alert("Water reminder started every " + minutes + " minutes 💧");
-
-    waterReminderInterval = setInterval(() => {
-        showNotification("💧 Water Reminder", "Please drink water now.");
-        speakText("Please drink water now.");
-    }, minutes * 60 * 1000);
-};
-
-window.stopWaterReminder = function () {
-    if (waterReminderInterval) {
-        clearInterval(waterReminderInterval);
-        waterReminderInterval = null;
-        waterReminderStarted = false;
-        alert("Water reminder stopped.");
-    }
-};
-
-window.calculateBMI = function () {
-    const height = Number(document.getElementById("heightInput").value);
-    const weight = Number(document.getElementById("weightInput").value);
-    const result = document.getElementById("bmiResult");
-
-    if (height <= 0 || weight <= 0) {
-        result.innerText = "Please enter valid height and weight.";
-        return;
-    }
-
-    const heightMeter = height / 100;
-    const bmi = weight / (heightMeter * heightMeter);
-
-    let status = "";
-
-    if (bmi < 18.5) status = "Underweight";
-    else if (bmi < 25) status = "Healthy";
-    else if (bmi < 30) status = "Overweight";
-    else status = "Obese";
-
-    result.innerText = "BMI: " + bmi.toFixed(1) + " - " + status;
-};
-
-window.addPrescriptionRecord = async function () {
-    if (!currentUser) {
-        alert("Please login first");
-        return;
-    }
-
-    const doctor = document.getElementById("prescriptionDoctor").value.trim();
-    const medicine = document.getElementById("prescriptionMedicine").value.trim();
-    const date = document.getElementById("prescriptionDate").value;
-    const notes = document.getElementById("prescriptionNotes").value.trim();
-
-    if (doctor === "" || medicine === "" || date === "") {
-        alert("Please enter doctor, medicine name and date");
-        return;
-    }
-
-    await addDoc(collection(db, "users", currentUser.uid, "prescriptions"), {
-        doctor,
-        medicine,
-        date,
-        notes,
-        createdAt: serverTimestamp()
-    });
-
-    document.getElementById("prescriptionDoctor").value = "";
-    document.getElementById("prescriptionMedicine").value = "";
-    document.getElementById("prescriptionDate").value = "";
-    document.getElementById("prescriptionNotes").value = "";
-
-    loadPrescriptions();
-
-    alert("Prescription record saved ✅");
-};
-
-async function loadPrescriptions() {
-    if (!currentUser) return;
-
-    const list = document.getElementById("prescriptionList");
-    if (!list) return;
-
-    list.innerHTML = "";
-
-    const q = query(
-        collection(db, "users", currentUser.uid, "prescriptions"),
-        orderBy("createdAt", "desc")
-    );
-
-    const snapshot = await getDocs(q);
-
-    if (snapshot.empty) {
-        list.innerHTML = `<div class="medicine-card">No prescription records yet.</div>`;
-        return;
-    }
-
-    snapshot.forEach(docSnap => {
-        const p = docSnap.data();
-
-        list.innerHTML += `
-            <div class="medicine-card">
-                <h3>📄 ${p.medicine}</h3>
-                <p><b>Doctor:</b> ${p.doctor}</p>
-                <p><b>Date:</b> ${p.date}</p>
-                <p><b>Notes:</b> ${p.notes || "No notes"}</p>
-            </div>
-        `;
-    });
-}
-
-window.downloadHealthReport = function () {
-    if (!currentUserData) {
-        alert("Please login first");
-        return;
-    }
-
-    let taken = 0;
-    let pending = 0;
-    let missed = 0;
-
-    medicines.forEach(medicine => {
-        medicine.times.forEach(dose => {
-            if (dose.taken) taken++;
-            else if (dose.missed || isMissed(dose.time)) missed++;
-            else pending++;
-        });
-    });
-
-    let medicineRows = "";
-
-    medicines.forEach(medicine => {
-        medicineRows += `
-            <tr>
-                <td>${medicine.name}</td>
-                <td>${medicine.category}</td>
-                <td>${medicine.stock}</td>
-                <td>${medicine.repeatDaily ? "Daily" : "One Time"}</td>
-                <td>${medicine.familyMemberName || "Self"}</td>
-                <td>${medicine.expiryDate || "-"}</td>
-            </tr>
-        `;
-    });
-
-    let appointmentRows = "";
-
     appointments.forEach(app => {
-        appointmentRows += `
-            <tr>
-                <td>${app.doctor}</td>
-                <td>${app.hospital || "-"}</td>
-                <td>${app.date}</td>
-                <td>${app.time}</td>
-            </tr>
-        `;
-    });
-
-    let doctorRows = "";
-
-    doctors.forEach(doctor => {
-        doctorRows += `
-            <tr>
-                <td>${doctor.name}</td>
-                <td>${doctor.specialization}</td>
-                <td>${doctor.contact}</td>
-                <td>${doctor.hospital}</td>
-            </tr>
-        `;
-    });
-
-    let historyRows = "";
-
-    historyItems.forEach(h => {
-        historyRows += `
-            <tr>
-                <td>${h.medicineName}</td>
-                <td>${h.time}</td>
-                <td>${h.status}</td>
-            </tr>
-        `;
-    });
-
-    const reportWindow = window.open("", "_blank");
-
-    reportWindow.document.write(`
-        <html>
-        <head>
-            <title>MediCare Health Report</title>
-            <style>
-                body{font-family:Arial,sans-serif;padding:30px;color:#1f2937;}
-                h1{color:#5b5ce2;text-align:center;}
-                h2{margin-top:30px;color:#374151;border-bottom:2px solid #e5e7eb;padding-bottom:8px;}
-                .summary{display:grid;grid-template-columns:repeat(3,1fr);gap:15px;margin-top:20px;}
-                .card{background:#f5f7ff;padding:15px;border-radius:12px;text-align:center;font-weight:bold;}
-                table{width:100%;border-collapse:collapse;margin-top:15px;}
-                th,td{border:1px solid #d1d5db;padding:10px;text-align:left;}
-                th{background:#eef2ff;}
-                .footer{margin-top:40px;text-align:center;color:#6b7280;font-size:13px;}
-                @media print{button{display:none;}}
-            </style>
-        </head>
-        <body>
-            <h1>💊 MediCare Health Report</h1>
-
-            <p><b>Patient:</b> ${currentUserData.name}</p>
-            <p><b>Email:</b> ${currentUserData.email}</p>
-            <p><b>Generated On:</b> ${new Date().toLocaleString()}</p>
-
-            <div class="summary">
-                <div class="card">Taken: ${taken}</div>
-                <div class="card">Pending: ${pending}</div>
-                <div class="card">Missed: ${missed}</div>
-            </div>
-
-            <h2>Medicine List</h2>
-            <table>
-                <tr>
-                    <th>Name</th>
-                    <th>Category</th>
-                    <th>Stock</th>
-                    <th>Type</th>
-                    <th>For</th>
-                    <th>Expiry</th>
-                </tr>
-                ${medicineRows || "<tr><td colspan='6'>No medicines found</td></tr>"}
-            </table>
-
-            <h2>Appointments</h2>
-            <table>
-                <tr>
-                    <th>Doctor</th>
-                    <th>Hospital</th>
-                    <th>Date</th>
-                    <th>Time</th>
-                </tr>
-                ${appointmentRows || "<tr><td colspan='4'>No appointments found</td></tr>"}
-            </table>
-
-            <h2>Doctors</h2>
-            <table>
-                <tr>
-                    <th>Name</th>
-                    <th>Specialization</th>
-                    <th>Contact</th>
-                    <th>Hospital</th>
-                </tr>
-                ${doctorRows || "<tr><td colspan='4'>No doctors found</td></tr>"}
-            </table>
-
-            <h2>Medicine History</h2>
-            <table>
-                <tr>
-                    <th>Medicine</th>
-                    <th>Time</th>
-                    <th>Status</th>
-                </tr>
-                ${historyRows || "<tr><td colspan='3'>No history found</td></tr>"}
-            </table>
-
-            <div class="footer">Generated by MediCare Reminder System</div>
-
-            <br>
-            <button onclick="window.print()">Download / Print PDF</button>
-        </body>
-        </html>
-    `);
-
-    reportWindow.document.close();
-};
-
-window.addFamilyMember = async function () {
-    if (!currentUser) {
-        alert("Please login first");
-        return;
-    }
-
-    const name = document.getElementById("familyMemberName").value.trim();
-    const relation = document.getElementById("familyMemberRelation").value.trim();
-
-    if (name === "" || relation === "") {
-        alert("Enter name and relation");
-        return;
-    }
-
-    await addDoc(collection(db, "users", currentUser.uid, "familyMembers"), {
-        name,
-        relation,
-        createdAt: serverTimestamp()
-    });
-
-    document.getElementById("familyMemberName").value = "";
-    document.getElementById("familyMemberRelation").value = "";
-
-    alert("Family member added ✅");
-};
-
-function listenFamilyMembers() {
-    const q = query(
-        collection(db, "users", currentUser.uid, "familyMembers"),
-        orderBy("createdAt", "desc")
-    );
-
-    unsubscribeFamilyMembers = onSnapshot(q, snapshot => {
-        familyMembers = [];
-
-        snapshot.forEach(docSnap => {
-            familyMembers.push({
-                id: docSnap.id,
-                ...docSnap.data()
-            });
-        });
-
-        displayFamilyMembers();
-        updateFamilyDropdown();
-        updateStats();
-        updateAnalytics();
-    });
-}
-
-function displayFamilyMembers() {
-    const list = document.getElementById("familyMemberList");
-    if (!list) return;
-
-    const search = document.getElementById("familySearch")?.value.toLowerCase() || "";
-
-    let filtered = familyMembers.filter(member =>
-        member.name.toLowerCase().includes(search) ||
-        member.relation.toLowerCase().includes(search)
-    );
-
-    list.innerHTML = "";
-
-    if (filtered.length === 0) {
-        list.innerHTML = `<div class="medicine-card">No family members found.</div>`;
-        return;
-    }
-
-    filtered.forEach(member => {
         list.innerHTML += `
-            <div class="medicine-card">
-                <h3>${member.name}</h3>
-                <p>${member.relation}</p>
-
-                <button class="delete-btn" onclick="deleteFamilyMember('${member.id}')">
-                    Delete
-                </button>
+            <div class="appointment-card">
+                <h3>🩺 ${app.doctor}</h3>
+                <p><b>Hospital:</b> ${app.hospital || "General Practice"}</p>
+                <p><b>Date & Time:</b> ${app.date} at ${formatTime(app.time)}</p>
+                ${app.notes ? `<p><b>Notes:</b> ${app.notes}</p>` : ""}
+                <button class="delete-btn" style="width:auto;" onclick="deleteAppointment('${app.id}')">Cancel Appointment</button>
             </div>
         `;
     });
 }
 
-window.displayFamilyMembers = displayFamilyMembers;
-
-function updateFamilyDropdown() {
-    const select = document.getElementById("medicineFamilyMember");
-    const filterDropdown = document.getElementById("medicineFilterMember");
-
-    if (select) {
-        select.innerHTML = `<option value="">👤 Self</option>`;
-
-        familyMembers.forEach(member => {
-            select.innerHTML += `
-                <option value="${member.id}">
-                    ${member.name} (${member.relation})
-                </option>
-            `;
-        });
-    }
-
-    if (filterDropdown) {
-        filterDropdown.innerHTML = `<option value="">All Members</option>`;
-
-        familyMembers.forEach(member => {
-            filterDropdown.innerHTML += `
-                <option value="${member.id}">
-                    ${member.name} (${member.relation})
-                </option>
-            `;
-        });
-    }
-}
-
-window.deleteFamilyMember = async function (memberId) {
-    if (!confirm("Delete this family member?")) return;
-
-    await deleteDoc(
-        doc(db, "users", currentUser.uid, "familyMembers", memberId)
-    );
-};
-
-// REQUIREMENT 1: emergency contact now belongs to the authenticated user
-// and lives in Firestore at users/{uid}/emergencyContact/info, never in a
-// shared/global place. localStorage is only used as a one-time migration
-// source for existing users (see migrateEmergencyContactIfNeeded below).
-function emergencyContactRef() {
-    return doc(db, "users", currentUser.uid, "emergencyContact", "info");
-}
-
-async function migrateEmergencyContactIfNeeded() {
-    if (!currentUser) return;
-
-    try {
-        const snap = await getDoc(emergencyContactRef());
-        if (snap.exists()) return; // already migrated / already using Firestore
-
-        const lsName = localStorage.getItem("emergencyName");
-        const lsPhone = localStorage.getItem("emergencyPhone");
-
-        if (lsName && lsPhone) {
-            await setDoc(emergencyContactRef(), {
-                emergencyName: lsName,
-                emergencyPhone: lsPhone,
-                updatedAt: serverTimestamp()
-            });
-
-            // Clear the old shared local key so it can never leak into
-            // another account signed in on the same browser/device.
-            localStorage.removeItem("emergencyName");
-            localStorage.removeItem("emergencyPhone");
-        }
-    } catch (e) {
-        console.error("Emergency contact migration failed", e);
-    }
-}
-
-window.saveEmergencyContact = async function () {
-    if (!currentUser) {
-        alert("Please login first");
-        return;
-    }
-
-    const name = document.getElementById("emergencyName").value.trim();
-    const phone = document.getElementById("emergencyPhone").value.trim();
-
-    if (name === "" || phone === "") {
-        alert("Enter emergency contact name and phone");
-        return;
-    }
-
-    try {
-        await setDoc(emergencyContactRef(), {
-            emergencyName: name,
-            emergencyPhone: phone,
-            updatedAt: serverTimestamp()
-        });
-
-        await loadEmergencyContact();
-        alert("Emergency Contact Saved ✅");
-    } catch (e) {
-        console.error("Could not save emergency contact", e);
-        alert("❌ Could not save emergency contact. Please try again.");
-    }
-};
-
-async function loadEmergencyContact() {
-    const box = document.getElementById("emergencyContactBox");
-    if (!box || !currentUser) return;
-
-    try {
-        const snap = await getDoc(emergencyContactRef());
-
-        if (!snap.exists()) {
-            box.innerHTML = `<div class="medicine-card">No emergency contact saved.</div>`;
-            return;
-        }
-
-        const { emergencyName, emergencyPhone } = snap.data();
-
-        document.getElementById("emergencyName").value = emergencyName || "";
-        document.getElementById("emergencyPhone").value = emergencyPhone || "";
-
-        box.innerHTML = `
-            <div class="medicine-card">
-                <h3>${emergencyName}</h3>
-                <p>${emergencyPhone}</p>
-                <a href="tel:${emergencyPhone}">📞 Call Emergency Contact</a>
-            </div>
-        `;
-    } catch (e) {
-        console.error("Could not load emergency contact", e);
-        box.innerHTML = `<div class="medicine-card">Could not load emergency contact.</div>`;
-    }
-}
-
-// REQUIREMENT 2, 9, 10: creates a proper, user-specific SOS alert in
-// Firestore, with a confirmation step and duplicate-click protection.
-// The button/status only ever says "sent" once Firestore confirms the
-// write — never optimistically before that.
-window.triggerSOS = async function () {
-    if (!currentUser) {
-        alert("Please login first");
-        return;
-    }
-
-    if (sosSending) return;
-
-    const confirmed = confirm(
-        "Are you sure you want to send an emergency SOS?\n\nThis will alert your authorized caregiver in real time."
-    );
+window.deleteAppointment = async function (id) {
+    const confirmed = await showConfirmModal("Cancel Appointment", "Cancel this appointment?");
     if (!confirmed) return;
-
-    sosSending = true;
-
-    const sosBtn = document.getElementById("sosButton");
-    const statusBox = document.getElementById("sosStatus");
-
-    if (sosBtn) {
-        sosBtn.disabled = true;
-        sosBtn.innerText = "Sending SOS...";
-    }
-    if (statusBox) {
-        statusBox.innerHTML = `<div class="medicine-card">Sending SOS...</div>`;
-    }
-
-    let contact = {};
-    try {
-        const contactSnap = await getDoc(emergencyContactRef());
-        if (contactSnap.exists()) contact = contactSnap.data();
-    } catch (e) {
-        console.error("Could not load emergency contact before sending SOS", e);
-    }
-
-    try {
-        await addDoc(
-            collection(db, "users", currentUser.uid, "caregiverAlerts"),
-            {
-                patientId: currentUser.uid,
-                patientName: currentUserData?.name || "Patient",
-                type: "SOS",
-                message: "Emergency SOS triggered",
-                emergencyContactName: contact.emergencyName || "Not set",
-                emergencyContactPhone: contact.emergencyPhone || "Not set",
-                createdAt: serverTimestamp(),
-                status: "ACTIVE"
-            }
-        );
-
-        showNotification(
-            "🚨 Emergency SOS",
-            "Your SOS alert has been sent to your authorized caregiver."
-        );
-
-        if (statusBox) {
-            statusBox.innerHTML = `
-                <div class="alert-card sos-alert sos-active">
-                    <h3>🚨 SOS SENT SUCCESSFULLY</h3>
-                    <p>Your authorized caregiver has been notified in real time.</p>
-                </div>
-            `;
-        }
-        if (sosBtn) sosBtn.innerText = "SOS Sent ✓";
-
-    } catch (e) {
-        console.error("SOS send failed", e);
-
-        if (statusBox) {
-            statusBox.innerHTML = `
-                <div class="alert-card">
-                    <h3>❌ SOS could not be sent</h3>
-                    <p>Please check your connection and try again.</p>
-                </div>
-            `;
-        }
-        if (sosBtn) sosBtn.innerText = "🚨 SEND EMERGENCY ALERT";
-    }
-
-    setTimeout(() => {
-        sosSending = false;
-        if (sosBtn) {
-            sosBtn.disabled = false;
-            sosBtn.innerText = "🚨 SEND EMERGENCY ALERT";
-        }
-    }, 8000);
+    await deleteDoc(doc(db, "users", currentUser.uid, "appointments", id));
+    showToast("Appointment cancelled.", "info");
 };
-window.forgotPassword = async function () {
-    const email = document.getElementById("authEmail").value.trim();
 
-    if (email === "") {
-        alert("Enter your email first.");
-        return;
-    }
-
-    try {
-        await sendPasswordResetEmail(auth, email);
-        alert("Password reset email sent.");
-    } catch (error) {
-        alert(error.message);
-    }
-};
-window.addDoctor = async function () {
-    if (!currentUser) {
-        alert("Please login first");
-        return;
-    }
+window.addDoctor = async function (e) {
+    if (e) e.preventDefault();
+    if (!currentUser) return;
 
     const name = document.getElementById("doctorManageName").value.trim();
     const specialization = document.getElementById("doctorSpecialization").value.trim();
     const contact = document.getElementById("doctorContact").value.trim();
     const hospital = document.getElementById("doctorHospital").value.trim();
 
-    if (name === "" || specialization === "" || contact === "" || hospital === "") {
-        alert("Please fill all doctor details");
-        return;
+    try {
+        await addDoc(collection(db, "users", currentUser.uid, "doctors"), {
+            name, specialization, contact, hospital, createdAt: serverTimestamp()
+        });
+        document.getElementById("doctorManageName").value = "";
+        document.getElementById("doctorSpecialization").value = "";
+        document.getElementById("doctorContact").value = "";
+        document.getElementById("doctorHospital").value = "";
+        showToast("Doctor saved to directory! 🏥", "success");
+    } catch (err) {
+        showToast(err.message, "danger");
     }
-
-    await addDoc(collection(db, "users", currentUser.uid, "doctors"), {
-        name,
-        specialization,
-        contact,
-        hospital,
-        createdAt: serverTimestamp()
-    });
-
-    document.getElementById("doctorManageName").value = "";
-    document.getElementById("doctorSpecialization").value = "";
-    document.getElementById("doctorContact").value = "";
-    document.getElementById("doctorHospital").value = "";
-
-    alert("Doctor added successfully ✅");
 };
 
 function listenDoctors() {
-    const q = query(
-        collection(db, "users", currentUser.uid, "doctors"),
-        orderBy("createdAt", "desc")
-    );
-
+    const q = query(collection(db, "users", currentUser.uid, "doctors"), orderBy("createdAt", "desc"));
     unsubscribeDoctors = onSnapshot(q, snapshot => {
         doctors = [];
-
-        snapshot.forEach(docSnap => {
-            doctors.push({
-                id: docSnap.id,
-                ...docSnap.data()
-            });
-        });
-
+        snapshot.forEach(docSnap => doctors.push({ id: docSnap.id, ...docSnap.data() }));
         displayDoctors();
-        updateAnalytics();
     });
 }
 
 function displayDoctors() {
     const list = document.getElementById("doctorList");
+    const search = document.getElementById("doctorSearch")?.value.toLowerCase() || "";
     if (!list) return;
 
+    const filtered = doctors.filter(d => d.name.toLowerCase().includes(search) || d.specialization.toLowerCase().includes(search));
+    if (filtered.length === 0) {
+        list.innerHTML = `<div class="empty-state"><p class="empty-text">No doctors saved.</p></div>`;
+        return;
+    }
+
     list.innerHTML = "";
-
-    if (doctors.length === 0) {
-        list.innerHTML = `<div class="medicine-card">No doctors added yet.</div>`;
-        return;
-    }
-
-    doctors.forEach(doctor => {
+    filtered.forEach(d => {
         list.innerHTML += `
-            <div class="medicine-card">
-                <h3>👨‍⚕ ${doctor.name}</h3>
-                <p><b>Specialization:</b> ${doctor.specialization}</p>
-                <p><b>Contact:</b> ${doctor.contact}</p>
-                <p><b>Hospital:</b> ${doctor.hospital}</p>
-
-                <a href="tel:${doctor.contact}">Call Doctor</a>
-
-                <button class="delete-btn" onclick="deleteDoctor('${doctor.id}')">
-                    Delete
-                </button>
+            <div class="doctor-card" style="display:flex;justify-content:space-between;align-items:center;">
+                <div>
+                    <h3>👨‍⚕ ${d.name}</h3>
+                    <p><b>Specialization:</b> ${d.specialization}</p>
+                    <p><b>Clinic:</b> ${d.hospital}</p>
+                    <a href="tel:${d.contact}" class="badge badge-success" style="text-decoration:none;display:inline-block;margin-top:6px;">📞 Call ${d.contact}</a>
+                </div>
+                <button class="delete-btn" style="width:auto;" onclick="deleteDoctor('${d.id}')">Delete</button>
             </div>
         `;
     });
 }
 
-window.deleteDoctor = async function (doctorId) {
-    if (!confirm("Delete this doctor?")) return;
-
-    await deleteDoc(doc(db, "users", currentUser.uid, "doctors", doctorId));
+window.deleteDoctor = async function (id) {
+    const confirmed = await showConfirmModal("Delete Doctor", "Remove this doctor from directory?");
+    if (!confirmed) return;
+    await deleteDoc(doc(db, "users", currentUser.uid, "doctors", id));
+    showToast("Doctor removed.", "info");
 };
 
-function updateAnalytics() {
-    let taken = 0;
-    let missed = 0;
-    let totalDoses = 0;
+// --------------------------------------------------------------------------
+// EMERGENCY SOS & CAREGIVER SYSTEM
+// --------------------------------------------------------------------------
+window.saveEmergencyContact = async function (e) {
+    if (e) e.preventDefault();
+    if (!currentUser) return;
 
-    medicines.forEach(medicine => {
-        medicine.times.forEach(dose => {
-            totalDoses++;
-
-            if (dose.taken) taken++;
-            if (dose.missed || isMissed(dose.time)) missed++;
-        });
-    });
-
-    const adherence = totalDoses === 0
-        ? 0
-        : Math.round((taken / totalDoses) * 100);
-
-    const adherenceBox = document.getElementById("adherencePercent");
-    const missedBox = document.getElementById("missedThisWeek");
-    const appointmentBox = document.getElementById("appointmentCount");
-    const doctorBox = document.getElementById("doctorCount");
-
-    if (adherenceBox) adherenceBox.innerText = adherence + "%";
-    if (missedBox) missedBox.innerText = missed;
-    if (appointmentBox) appointmentBox.innerText = appointments.length;
-    if (doctorBox) doctorBox.innerText = doctors.length;
-
-    updateFamilyStats();
-}
-
-function updateFamilyStats() {
-    const box = document.getElementById("familyStatsBox");
-    if (!box) return;
-
-    box.innerHTML = "";
-
-    const stats = {};
-
-    medicines.forEach(medicine => {
-        const member = medicine.familyMemberName || "Self";
-
-        if (!stats[member]) {
-            stats[member] = {
-                total: 0,
-                taken: 0,
-                missed: 0
-            };
-        }
-
-        medicine.times.forEach(dose => {
-            stats[member].total++;
-
-            if (dose.taken) stats[member].taken++;
-            if (dose.missed || isMissed(dose.time)) stats[member].missed++;
-        });
-    });
-
-    const members = Object.keys(stats);
-
-    if (members.length === 0) {
-        box.innerHTML = `<div class="medicine-card">No family statistics yet.</div>`;
-        return;
-    }
-
-    members.forEach(member => {
-        const s = stats[member];
-        const percent = s.total === 0
-            ? 0
-            : Math.round((s.taken / s.total) * 100);
-
-        box.innerHTML += `
-            <div class="medicine-card">
-                <h3>${member}</h3>
-                <p><b>Total Doses:</b> ${s.total}</p>
-                <p><b>Taken:</b> ${s.taken}</p>
-                <p><b>Missed:</b> ${s.missed}</p>
-                <p><b>Adherence:</b> ${percent}%</p>
-            </div>
-        `;
-    });
-}
-
-window.saveGeminiKey = function () {
-    const key = document.getElementById("geminiInput").value.trim();
-    if (key === "") {
-        alert("Please enter a valid Gemini API Key.");
-        return;
-    }
-    localStorage.setItem("userGeminiKey", key);
-    GEMINI_API_KEY = key;
-    alert("Gemini API Key saved securely in your browser! ✅");
-};
-
-window.askHealthAI = async function () {
-    const question = document.getElementById("aiQuestion").value.trim();
-    const answerBox = document.getElementById("aiAnswer");
-    const activeKey = localStorage.getItem("userGeminiKey") || GEMINI_API_KEY;
-
-    if (question === "") {
-        answerBox.innerHTML = "Please enter a question.";
-        return;
-    }
-
-    if (!activeKey || activeKey === "YOUR_GEMINI_API_KEY" || activeKey === "") {
-        answerBox.innerHTML = "⚠️ <b>API Key Required:</b> Please enter and save your Gemini API Key in the box above to activate the AI Assistant.";
-        return;
-    }
-
-    answerBox.innerHTML = "🤖 Thinking...";
-
-    const medicineSummary = medicines.map(m => {
-        return `${m.name}, ${m.category}, stock ${m.stock}, for ${m.familyMemberName || "Self"}, expiry ${m.expiryDate || "not set"}`;
-    }).join("\n");
-
-    const appointmentSummary = appointments.map(a => {
-        return `${a.doctor} at ${a.hospital || "hospital"} on ${a.date} ${a.time}`;
-    }).join("\n");
+    const name = document.getElementById("emergencyName").value.trim();
+    const phone = document.getElementById("emergencyPhone").value.trim();
 
     try {
-        const response = await fetch(
-"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=" + activeKey,
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    contents: [
-                        {
-                            parts: [
-                                {
-                                    text: `
-You are MediCare AI Health Assistant.
+        await setDoc(doc(db, "users", currentUser.uid, "emergencyContact", "info"), {
+            emergencyName: name, emergencyPhone: phone, updatedAt: serverTimestamp()
+        });
+        showToast("Emergency contact saved!", "success");
+        loadEmergencyContact();
+    } catch (err) {
+        showToast(err.message, "danger");
+    }
+};
 
-Use this user's app data if helpful.
+async function loadEmergencyContact() {
+    const box = document.getElementById("emergencyContactBox");
+    if (!box || !currentUser) return;
+    try {
+        const snap = await getDoc(doc(db, "users", currentUser.uid, "emergencyContact", "info"));
+        if (snap.exists()) {
+            const data = snap.data();
+            document.getElementById("emergencyName").value = data.emergencyName || "";
+            document.getElementById("emergencyPhone").value = data.emergencyPhone || "";
+            box.innerHTML = `
+                <div class="medicine-card">
+                    <h3>🚨 Private Emergency Contact</h3>
+                    <p><b>Name:</b> ${data.emergencyName}</p>
+                    <p><b>Phone:</b> ${data.emergencyPhone}</p>
+                    <a href="tel:${data.emergencyPhone}" class="secondary-btn" style="display:inline-block;margin-top:10px;text-decoration:none;width:auto;">📞 Call Contact Now</a>
+                </div>
+            `;
+        }
+    } catch (e) { console.error("Load emergency contact error:", e); }
+}
 
-Medicines:
-${medicineSummary || "No medicines added"}
+window.triggerSOS = async function () {
+    if (!currentUser || sosSending) return;
+    const confirmed = await showConfirmModal("🚨 SEND EMERGENCY SOS", "Are you sure you want to trigger an Emergency SOS Alert to your caregivers?");
+    if (!confirmed) return;
 
-Appointments:
-${appointmentSummary || "No appointments added"}
+    sosSending = true;
+    const sosBtn = document.getElementById("sosButton");
+    const statusBox = document.getElementById("sosStatus");
 
-Doctors:
-${doctors.map(d => `${d.name}, ${d.specialization}, ${d.hospital}`).join("\n") || "No doctors added"}
+    sosBtn.disabled = true;
+    sosBtn.innerText = "Sending SOS Broadcast...";
+    statusBox.innerHTML = `<div class="toast toast-warning">Broadcasting SOS Alert to backend & caregivers...</div>`;
 
-Rules:
-- Give clear, simple health guidance.
-- Do not diagnose diseases.
-- Do not prescribe medicine dosage.
-- If serious symptoms are mentioned, advise doctor/emergency care.
-- For medicine questions, say to follow doctor prescription or medicine label.
-- Keep answer short and useful.
+    try {
+        const sendSOSAlertCall = httpsCallable(functions, "sendSOSAlert");
+        const res = await sendSOSAlertCall({
+            patientName: currentUserData?.name || "Patient",
+            emergencyContactPhone: document.getElementById("emergencyPhone")?.value || ""
+        });
 
-User question:
-${question}
-`
-                                }
-                            ]
-                        }
-                    ],
-                    generationConfig: {
-                        temperature: 0.3,
-                        maxOutputTokens: 400
-                    }
-                })
-            }
-        );
-        const data = await response.json();
-console.log(data);
+        statusBox.innerHTML = `
+            <div class="alert-card sos-alert sos-active">
+                <h3>🚨 SOS BROADCAST SUCCESSFUL</h3>
+                <p>Authorized Caregivers Notified: <b>${res.data?.caregiversNotified || 0}</b></p>
+                <p>SMS Status: <b>${res.data?.smsStatus || "disabled"}</b></p>
+            </div>
+        `;
+        showToast("🚨 Emergency SOS Alert Triggered!", "danger", 6000);
+    } catch (err) {
+        // Fallback local Firestore write if Functions backend is offline
+        await addDoc(collection(db, "users", currentUser.uid, "caregiverAlerts"), {
+            patientId: currentUser.uid,
+            patientName: currentUserData?.name || "Patient",
+            type: "SOS",
+            message: "Emergency SOS triggered",
+            status: "ACTIVE",
+            createdAt: serverTimestamp()
+        });
+        statusBox.innerHTML = `
+            <div class="alert-card sos-alert">
+                <h3>🚨 SOS Alert Logged to Firestore</h3>
+            </div>
+        `;
+        showToast("SOS Alert saved to Firestore feed.", "warning");
+    } finally {
+        setTimeout(() => {
+            sosSending = false;
+            sosBtn.disabled = false;
+            sosBtn.innerText = "🚨 SEND EMERGENCY SOS ALERT";
+        }, 5000);
+    }
+};
 
+let unsubscribeCaregiverRequests = null;
+let unsubscribeAuthorizedCaregivers = null;
 
-        if (!response.ok) {
-            answerBox.innerHTML =
-                "❌ AI Error: " + (data.error?.message || "Request failed");
+window.requestPatientLink = async function () {
+    const code = document.getElementById("caregiverSearchCode").value.trim().toUpperCase();
+    if (!code) { showToast("Enter a valid patient caregiver code.", "warning"); return; }
+    if (code === currentUserData?.caregiverCode) {
+        showToast("You cannot link your own caregiver code.", "warning");
+        return;
+    }
+
+    try {
+        const requestCaregiverLinkCall = httpsCallable(functions, "requestCaregiverLink");
+        const res = await requestCaregiverLinkCall({ caregiverCode: code });
+        showToast(res.data?.message || "Link request sent to patient! Awaiting approval.", "success");
+        document.getElementById("caregiverSearchCode").value = "";
+    } catch (err) {
+        showToast("Link request failed: " + err.message, "danger");
+    }
+};
+
+function listenCaregiverRequests() {
+    if (!currentUser) return;
+    const q = query(collection(db, "users", currentUser.uid, "caregiverRequests"));
+    unsubscribeCaregiverRequests = onSnapshot(q, snapshot => {
+        const container = document.getElementById("caregiverRequestsList");
+        if (!container) return;
+
+        const pending = [];
+        snapshot.forEach(docSnap => {
+            const data = docSnap.data();
+            if (data.status === "pending") pending.push({ id: docSnap.id, ...data });
+        });
+
+        if (pending.length === 0) {
+            container.innerHTML = `<p class="empty-text">No pending caregiver link requests.</p>`;
             return;
         }
 
-        const text =
-            data.candidates?.[0]?.content?.parts?.[0]?.text ||
-            "No response received.";
+        container.innerHTML = "";
+        pending.forEach(req => {
+            container.innerHTML += `
+                <div class="medicine-card" style="display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                        <h3>👨‍⚕ Caregiver Request: ${req.caregiverName}</h3>
+                        <p style="font-size:13px;color:var(--text-secondary);">${req.caregiverEmail}</p>
+                    </div>
+                    <div>
+                        <button class="primary-btn" style="width:auto;padding:6px 14px;" onclick="approveCaregiverRequest('${req.caregiverId}', '${req.caregiverName}')">Approve ✅</button>
+                        <button class="delete-btn" style="width:auto;padding:6px 14px;margin-left:6px;" onclick="rejectCaregiverRequest('${req.caregiverId}')">Reject ❌</button>
+                    </div>
+                </div>
+            `;
+        });
+    });
+}
 
-        answerBox.innerHTML = text.replace(/\n/g, "<br>");
-    } catch (error) {
-        answerBox.innerHTML =
-            "❌ Error contacting AI assistant: " + error.message;
+window.approveCaregiverRequest = async function (caregiverId, caregiverName) {
+    if (!currentUser) return;
+    try {
+        const approveCall = httpsCallable(functions, "approveCaregiverRequest");
+        await approveCall({ caregiverId, caregiverName });
+        showToast(`Approved ${caregiverName} as authorized caregiver!`, "success");
+    } catch (err) {
+        showToast("Error approving request: " + err.message, "danger");
     }
 };
 
-if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("sw.js");
+window.rejectCaregiverRequest = async function (caregiverId) {
+    if (!currentUser) return;
+    try {
+        await deleteDoc(doc(db, "users", currentUser.uid, "caregiverRequests", caregiverId));
+        showToast("Caregiver request rejected.", "info");
+    } catch (err) {
+        showToast("Error rejecting request: " + err.message, "danger");
+    }
+};
+
+function listenAuthorizedCaregivers() {
+    if (!currentUser) return;
+    const q = query(collection(db, "users", currentUser.uid, "authorizedCaregivers"));
+    unsubscribeAuthorizedCaregivers = onSnapshot(q, snapshot => {
+        const container = document.getElementById("authorizedCaregiversList");
+        if (!container) return;
+
+        if (snapshot.empty) {
+            container.innerHTML = `<p class="empty-text">No authorized caregivers yet.</p>`;
+            return;
+        }
+
+        container.innerHTML = "";
+        snapshot.forEach(docSnap => {
+            const cg = docSnap.data();
+            container.innerHTML += `
+                <div class="medicine-card" style="display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                        <h3>👨‍⚕ ${cg.caregiverName || "Authorized Caregiver"}</h3>
+                        <span class="badge badge-success">Approved ✅</span>
+                    </div>
+                    <button class="delete-btn" style="width:auto;padding:6px 14px;" onclick="revokeCaregiverAccess('${cg.caregiverId}')">Revoke Access</button>
+                </div>
+            `;
+        });
+    });
 }
 
-window.showPage = function (pageId) {
-    const pages = document.querySelectorAll(".page-section");
+window.revokeCaregiverAccess = async function (caregiverId) {
+    const confirmed = await showConfirmModal("Revoke Access", "Revoke caregiver access for this user?");
+    if (!confirmed) return;
+    try {
+        const revokeCall = httpsCallable(functions, "revokeCaregiverAccess");
+        await revokeCall({ caregiverId });
+        showToast("Caregiver access revoked.", "info");
+    } catch (e) { showToast(e.message, "danger"); }
+};
 
-    pages.forEach(page => {
-        page.classList.add("hidden");
+window.confirmDeleteAccount = async function () {
+    const confirmed = await showConfirmModal("PERMANENT ACCOUNT DELETION", "Are you sure you want to PERMANENTLY delete your account and all data? This action CANNOT be undone!");
+    if (!confirmed) return;
+
+    showToast("Deleting all user data and account...", "warning", 5000);
+    try {
+        const deleteCall = httpsCallable(functions, "deleteUserAccountAndData");
+        await deleteCall();
+        await signOut(auth);
+        showToast("Account and all associated data deleted permanently.", "info", 5000);
+    } catch (e) {
+        showToast("Account deletion failed: " + e.message, "danger");
+    }
+};
+
+async function loadLinkedPatients() {
+    const list = document.getElementById("linkedPatientsList");
+    if (!list || !currentUser) return;
+    try {
+        const snap = await getDocs(collection(db, "users", currentUser.uid, "linkedPatients"));
+        if (snap.empty) {
+            list.innerHTML = `<p class="empty-text">No linked patients yet.</p>`;
+            return;
+        }
+        list.innerHTML = "";
+        snap.forEach(docSnap => {
+            const p = docSnap.data();
+            list.innerHTML += `<button class="secondary-btn" style="width:auto;margin:4px;" onclick="viewPatient('${p.patientId}', '${p.patientName}')">👤 View ${p.patientName}</button>`;
+        });
+    } catch (e) { console.error("Load linked patients error:", e); }
+}
+
+window.viewPatient = async function (patientId, name) {
+    const container = document.getElementById("caregiverData");
+    container.innerHTML = `<div class="skeleton-card"></div>`;
+    try {
+        const medsSnap = await getDocs(collection(db, "users", patientId, "medicines"));
+        let html = `<h3>Patient Profile: ${name}</h3>`;
+        medsSnap.forEach(d => {
+            const m = d.data();
+            html += `<div class="medicine-card"><h3>${m.name}</h3><p>Category: ${m.category} | Stock: ${m.stock}</p></div>`;
+        });
+        container.innerHTML = html;
+    } catch (e) { container.innerHTML = `<p class="empty-text">Could not fetch patient details.</p>`; }
+};
+
+function listenCaregiverAlerts() {
+    const q = query(collection(db, "users", currentUser.uid, "caregiverAlerts"), orderBy("createdAt", "desc"));
+    unsubscribeCaregiverAlerts = onSnapshot(q, snapshot => {
+        caregiverAlerts = [];
+        snapshot.forEach(docSnap => caregiverAlerts.push({ id: docSnap.id, ...docSnap.data() }));
+        displayCaregiverAlerts();
     });
+}
 
-    const activePage = document.getElementById(pageId);
+function displayCaregiverAlerts() {
+    const list = document.getElementById("caregiverAlertList");
+    if (!list) return;
+    if (caregiverAlerts.length === 0) {
+        list.innerHTML = `<p class="empty-text">No active alerts.</p>`;
+        return;
+    }
+    list.innerHTML = "";
+    caregiverAlerts.forEach(a => {
+        list.innerHTML += `
+            <div class="alert-card ${a.type === 'SOS' ? 'sos-alert' : ''}">
+                <h3>${a.type === 'SOS' ? '🚨 EMERGENCY SOS' : '⚠️ Missed Dose Alert'}</h3>
+                <p>${a.message}</p>
+                <small>${a.createdAt?.toDate ? a.createdAt.toDate().toLocaleString() : 'Just now'}</small>
+            </div>
+        `;
+    });
+}
 
-    if (activePage) {
-        activePage.classList.remove("hidden");
+// --------------------------------------------------------------------------
+// AI HEALTH ASSISTANT LOGIC (Backend Cloud Function Proxy)
+// --------------------------------------------------------------------------
+function listenAIChats() {
+    if (!currentUser) return;
+    const q = query(collection(db, "users", currentUser.uid, "aiChats"), orderBy("createdAt", "asc"));
+    unsubscribeAIChats = onSnapshot(q, snapshot => {
+        aiChats = [];
+        snapshot.forEach(docSnap => aiChats.push({ id: docSnap.id, ...docSnap.data() }));
+        renderAIChats();
+    });
+}
+
+function renderAIChats() {
+    const historyBox = document.getElementById("chatHistory");
+    if (!historyBox) return;
+
+    if (aiChats.length === 0) {
+        historyBox.innerHTML = `
+            <div class="chat-bubble assistant-bubble">
+                👋 Hello! I am your MediCare AI Health Assistant. Ask me about your medicine schedules, general health guidance, or wellness tips!
+            </div>
+        `;
+        return;
     }
 
-    if (pageId === "aiPage") {
-        const geminiInput = document.getElementById("geminiInput");
-        if (geminiInput) {
-            geminiInput.value = localStorage.getItem("userGeminiKey") || "";
+    historyBox.innerHTML = "";
+    aiChats.forEach(chat => {
+        const userDiv = document.createElement("div");
+        userDiv.className = "chat-bubble user-bubble";
+        userDiv.innerText = chat.question;
+
+        const aiDiv = document.createElement("div");
+        aiDiv.className = "chat-bubble assistant-bubble";
+        aiDiv.innerHTML = chat.answer.replace(/\n/g, "<br>");
+
+        historyBox.appendChild(userDiv);
+        historyBox.appendChild(aiDiv);
+    });
+
+    historyBox.scrollTop = historyBox.scrollHeight;
+}
+
+function handleFunctionError(err, contextName = "AI Assistant") {
+    console.error(`[${contextName}] Call error:`, err);
+    let msg = "An unexpected error occurred. Please try again.";
+    const code = err?.code || "";
+    const rawMsg = err?.message || "";
+
+    if (code === "unauthenticated" || rawMsg.includes("Authentication required") || rawMsg.includes("log in")) {
+        msg = "Please log in to use the AI Assistant.";
+    } else if (code === "resource-exhausted" || rawMsg.includes("Rate limit")) {
+        msg = "Rate limit reached. Please wait a moment before trying again.";
+    } else if (code === "failed-precondition" || rawMsg.includes("unconfigured") || rawMsg.includes("GEMINI_API_KEY missing")) {
+        msg = "AI Assistant service is currently unconfigured (GEMINI_API_KEY missing).";
+    } else if (code === "unavailable" || rawMsg.includes("unavailable") || rawMsg.includes("Failed to reach")) {
+        msg = "Gemini service is currently unavailable. Please try again later.";
+    } else if (code === "permission-denied") {
+        msg = "API Key or permission error when communicating with Gemini AI.";
+    } else if (code === "invalid-argument") {
+        msg = rawMsg || "Invalid request parameter.";
+    } else if (rawMsg) {
+        msg = rawMsg;
+    }
+
+    showToast(`${contextName} error: ${msg}`, "danger");
+    return msg;
+}
+
+window.saveGeminiKey = async function() {
+    const key = document.getElementById("userGeminiApiKey").value.trim();
+    if (key) {
+        localStorage.setItem("medicare_gemini_key", key);
+        showToast("Gemini API Key saved. Testing key...", "info");
+        await window.testGeminiKey();
+    } else {
+        showToast("Please enter a valid API key.", "warning");
+    }
+};
+
+window.removeGeminiKey = function() {
+    localStorage.removeItem("medicare_gemini_key");
+    localStorage.removeItem("medicare_gemini_model");
+    localStorage.removeItem("medicare_gemini_model_time");
+    const input = document.getElementById("userGeminiApiKey");
+    if (input) input.value = "";
+    const statusEl = document.getElementById("geminiKeyStatusText");
+    if (statusEl) {
+        statusEl.innerText = "Status: No key saved.";
+        statusEl.style.color = "var(--text-secondary)";
+    }
+    const modelText = document.getElementById("geminiActiveModelText");
+    if (modelText) modelText.innerText = "Active Model: ---";
+    const sel = document.getElementById("geminiModelOverride");
+    if (sel) sel.innerHTML = '<option value="auto">Auto (Recommended)</option>';
+    showToast("Gemini API Key removed.", "info");
+};
+
+// Dynamic Model Selection & Unified API Call
+window.getAvailableGeminiModels = async function(apiKey) {
+    let models = [];
+    let pageToken = "";
+    try {
+        do {
+            let url = `https://generativelanguage.googleapis.com/v1beta/models?pageSize=100`;
+            if (pageToken) url += `&pageToken=${pageToken}`;
+            
+            const res = await fetch(url, {
+                method: "GET",
+                headers: { "x-goog-api-key": apiKey }
+            });
+            
+            if (!res.ok) {
+                if (res.status === 400 || res.status === 403) throw new Error("Invalid API key or API disabled.");
+                if (res.status === 429) throw new Error("Rate limit exceeded. Please wait a minute.");
+                throw new Error("Failed to fetch models.");
+            }
+            const data = await res.json();
+            if (data.models) {
+                models = models.concat(data.models);
+            }
+            pageToken = data.nextPageToken || "";
+        } while (pageToken);
+        
+        return models.filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"));
+    } catch (e) {
+        throw e;
+    }
+};
+
+window.pickBestGeminiModel = function(models) {
+    let getVer = (name) => {
+        let match = name.match(/gemini-(\d+\.\d+)/);
+        return match ? parseFloat(match[1]) : 0;
+    };
+
+    let flashStable = [];
+    let flashLite = [];
+    let others = [];
+
+    for (let m of models) {
+        let n = m.name.toLowerCase();
+        if (n.includes("-preview") || n.includes("-image") || n.includes("-tts") || n.includes("-live") || n.includes("-embedding") || n.includes("-vision")) {
+            others.push(m);
+            continue;
+        }
+        if (n.includes("-flash-lite")) {
+            flashLite.push(m);
+        } else if (n.includes("-flash")) {
+            flashStable.push(m);
+        } else {
+            others.push(m);
+        }
+    }
+
+    let sortFn = (a, b) => getVer(b.name) - getVer(a.name);
+    flashStable.sort(sortFn);
+    flashLite.sort(sortFn);
+    others.sort(sortFn);
+
+    if (flashStable.length > 0) return flashStable[0].name;
+    if (flashLite.length > 0) return flashLite[0].name;
+    if (others.length > 0) return others[0].name;
+    
+    return (models && models.length > 0) ? models[0].name : ""; 
+};
+
+window.getActiveModel = async function(apiKey = null, forceRefresh = false, excludeModel = null) {
+    const key = apiKey || localStorage.getItem("medicare_gemini_key");
+    const override = document.getElementById("geminiModelOverride")?.value;
+    if (!forceRefresh && override && override !== "auto" && override !== excludeModel) {
+        const txt = document.getElementById("geminiActiveModelText");
+        if (txt) txt.innerText = `Active Model: ${override.replace('models/', '')} (Manual)`;
+        return override;
+    }
+
+    let cached = localStorage.getItem("medicare_gemini_model");
+    let cachedTime = localStorage.getItem("medicare_gemini_model_time");
+    let now = Date.now();
+    let shouldFetch = forceRefresh || !cached || (excludeModel && (cached === excludeModel || cached.endsWith(excludeModel))) || !cachedTime || (now - parseInt(cachedTime) > 24 * 60 * 60 * 1000);
+
+    if (shouldFetch && key) {
+        let modelsList = await window.getAvailableGeminiModels(key);
+        if (excludeModel) {
+            modelsList = modelsList.filter(m => m.name !== excludeModel && !m.name.endsWith(excludeModel));
+        }
+        cached = window.pickBestGeminiModel(modelsList);
+        if (cached) {
+            localStorage.setItem("medicare_gemini_model", cached);
+            localStorage.setItem("medicare_gemini_model_time", now.toString());
+        }
+    }
+
+    if (cached && document.getElementById("geminiActiveModelText")) {
+        document.getElementById("geminiActiveModelText").innerText = `Active Model: ${cached.replace('models/', '')}`;
+    }
+
+    return cached;
+};
+window.getGeminiModel = window.getActiveModel;
+
+window.populateModelDropdown = async function(apiKey) {
+    const sel = document.getElementById("geminiModelOverride");
+    if (!sel) return;
+    try {
+        let models = await window.getAvailableGeminiModels(apiKey);
+        sel.innerHTML = '<option value="auto">Auto (Recommended)</option>';
+        models.forEach(m => {
+            let opt = document.createElement("option");
+            opt.value = m.name;
+            opt.innerText = m.displayName || m.name.replace('models/', '');
+            sel.appendChild(opt);
+        });
+    } catch (e) {
+        console.warn("Could not populate models dropdown", e);
+    }
+};
+
+window.callGemini = async function(prompt, options = {}) {
+    const apiKey = options.apiKey || localStorage.getItem("medicare_gemini_key");
+    if (!apiKey) {
+        throw new Error("Add your Gemini key to enable AI.");
+    }
+
+    let modelName;
+    try {
+        modelName = await window.getActiveModel(apiKey, options.forceRefresh || false, options.excludeModel || null);
+    } catch (e) {
+        throw new Error("Failed to select AI model. Check your API key.");
+    }
+
+    if (!modelName) {
+        throw new Error("No available Gemini model found for this key.");
+    }
+
+    let cleanModelName = modelName.startsWith("models/") ? modelName : `models/${modelName}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/${cleanModelName}:generateContent`;
+
+    const payload = {
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: options.generationConfig || { temperature: 0.4, maxOutputTokens: 700 }
+    };
+    if (options.systemInstruction) {
+        payload.system_instruction = { parts: [{ text: options.systemInstruction }] };
+    }
+
+    try {
+        const response = await fetch(url, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "x-goog-api-key": apiKey
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const status = response.status;
+            // If 404, refresh model list once, switch to the next best model, retry once, and update the "Active Model" label in the UI
+            if (status === 404 && options.retryOn404 !== false) {
+                console.warn(`[callGemini] Model ${cleanModelName} returned 404. Refreshing model list and trying next best model...`);
+                const nextModel = await window.getActiveModel(apiKey, true, cleanModelName);
+                if (nextModel && nextModel !== cleanModelName) {
+                    showToast(`Model ${cleanModelName.replace('models/', '')} not found. Switched to ${nextModel.replace('models/', '')}. Retrying...`, "info");
+                    return window.callGemini(prompt, { ...options, retryOn404: false });
+                }
+            }
+            if (status === 400 || status === 403) throw new Error("Invalid key or API disabled.");
+            if (status === 404) throw new Error("Model not found. Retried and failed.");
+            if (status === 429) throw new Error("Quota or rate limit exceeded. Please wait a minute.");
+            if (status >= 500) throw new Error("Gemini network service down. Please try later.");
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData.error?.message || `API Error ${status}`);
+        }
+
+        const data = await response.json();
+        if (data.promptFeedback && data.promptFeedback.blockReason) {
+            throw new Error("Prompt blocked by safety filters: " + data.promptFeedback.blockReason);
+        }
+
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!text) {
+            throw new Error("Empty response from AI.");
+        }
+        return text;
+    } catch (err) {
+        let safeMsg = err.message.replace(apiKey, "[HIDDEN_KEY]");
+        throw new Error(safeMsg);
+    }
+};
+window.callGeminiAPI = window.callGemini;
+
+window.testGeminiKey = async function() {
+    const inputKey = document.getElementById("userGeminiApiKey")?.value.trim();
+    const key = inputKey || localStorage.getItem("medicare_gemini_key");
+    if (!key) {
+        showToast("No API key found to test.", "warning");
+        return;
+    }
+
+    const statusEl = document.getElementById("geminiKeyStatusText");
+    if (statusEl) {
+        statusEl.innerText = "Status: Testing key & loading models... ⏳";
+        statusEl.style.color = "var(--warning-color)";
+    }
+
+    try {
+        const models = await window.getAvailableGeminiModels(key);
+        if (!localStorage.getItem("medicare_gemini_key")) {
+            localStorage.setItem("medicare_gemini_key", key);
+        }
+
+        const best = window.pickBestGeminiModel(models);
+        localStorage.setItem("medicare_gemini_model", best);
+        localStorage.setItem("medicare_gemini_model_time", Date.now().toString());
+
+        await window.populateModelDropdown(key);
+
+        // Verify key by calling Gemini via callGemini
+        await window.callGemini("Respond with 'OK' if working.", { apiKey: key });
+
+        if (statusEl) {
+            statusEl.innerText = `Status: Key valid! Found ${models.length} usable models. ✅`;
+            statusEl.style.color = "var(--success-color)";
+        }
+        const activeText = document.getElementById("geminiActiveModelText");
+        if (activeText) {
+            activeText.innerText = `Active Model: ${best.replace('models/', '')}`;
+        }
+        showToast(`API Key valid. Active model: ${best.replace('models/', '')}`, "success");
+    } catch(e) {
+        if (statusEl) {
+            statusEl.innerText = "Status: Key test failed. ❌";
+            statusEl.style.color = "var(--danger-color)";
+        }
+        let safeMsg = e.message.replace(key, "[HIDDEN_KEY]");
+        showToast("API Key test failed: " + safeMsg, "danger");
+    }
+};
+
+window.loadGeminiKeyUI = async function() {
+    const key = localStorage.getItem("medicare_gemini_key");
+    if (key) {
+        const input = document.getElementById("userGeminiApiKey");
+        if (input) input.value = key;
+        const statusEl = document.getElementById("geminiKeyStatusText");
+        if (statusEl) {
+            statusEl.innerText = "Status: Key loaded from storage. ✅";
+            statusEl.style.color = "var(--success-color)";
+        }
+        try {
+            await window.getActiveModel(key, false);
+            await window.populateModelDropdown(key);
+        } catch (e) {
+            console.warn("Could not auto-load model on startup", e);
         }
     }
 };
 
-window.startVoiceAssistant = function () {
-    alert("Voice button clicked ✅");
+window.addEventListener("load", () => {
+    if (window.loadGeminiKeyUI) window.loadGeminiKeyUI();
+});
 
-    const SpeechRecognition =
-        window.SpeechRecognition || window.webkitSpeechRecognition;
+window.askHealthAI = async function (e) {
+    if (e) e.preventDefault();
 
-    const voiceBox = document.getElementById("voiceText");
-
-    if (!voiceBox) {
-        alert("voiceText not found in HTML");
+    if (!currentUser) {
+        showToast("Please log in to ask questions to the AI Assistant.", "warning");
         return;
     }
 
-    if (!SpeechRecognition) {
-        voiceBox.innerText = "Voice recognition not supported. Use Google Chrome.";
-        alert("Voice recognition not supported. Use Google Chrome.");
+    const consentBox = document.getElementById("aiConsentCheckbox");
+    if (consentBox && !consentBox.checked) {
+        showToast("Please check the AI data processing consent box before submitting.", "warning");
         return;
     }
 
-    const recognition = new SpeechRecognition();
+    const apiKey = localStorage.getItem("medicare_gemini_key");
+    if (!apiKey) {
+        showToast("Add your Gemini key to enable AI.", "warning");
+        const geminiInput = document.getElementById("geminiKeyInput");
+        if (geminiInput) geminiInput.focus();
+        return;
+    }
 
-    recognition.lang = "en-US";
-    recognition.continuous = false;
-    recognition.interimResults = false;
+    const input = document.getElementById("aiQuestion");
+    const question = input.value.trim();
+    const submitBtn = document.getElementById("aiSubmitBtn");
 
-    voiceBox.innerText = "🎤 Listening... Speak now.";
+    if (!question) return;
 
-    recognition.start();
+    // Safety emergency filter check
+    const lower = question.toLowerCase();
+    if (lower.includes("chest pain") || lower.includes("heart attack") || lower.includes("bleeding")) {
+        showToast("🚨 Medical Emergency detected! Contact 911 / 108 immediately.", "danger", 7000);
+    }
 
-    recognition.onresult = function (event) {
-        const command = event.results[0][0].transcript.toLowerCase();
+    input.value = "";
+    submitBtn.disabled = true;
 
-        voiceBox.innerText = "You said: " + command;
+    try {
+        const medSummary = medicines.map(m => `${m.name} (${m.dosage || '1 dose'})`).join(", ");
+        const appSummary = appointments.map(a => `${a.doctor} on ${a.date}`).join(", ");
+        const docSummary = doctors.map(d => d.name).join(", ");
+        
+        const systemInstruction = `You are a helpful AI Health Assistant for the MediCare app. The user's active medicines are: ${medSummary}. Their upcoming appointments are: ${appSummary}. Their saved doctors are: ${docSummary}. Answer their health queries politely and concisely. Do not provide critical medical diagnoses, advise them to see a doctor for serious issues.`;
 
-        fillMedicineFromVoice(command);
-    };
+        const answer = await window.callGemini(question, { systemInstruction });
 
-    recognition.onerror = function (event) {
-        voiceBox.innerText = "Voice error: " + event.error;
-        alert("Voice error: " + event.error);
+        await addDoc(collection(db, "users", currentUser.uid, "aiChats"), {
+            question, answer, createdAt: serverTimestamp()
+        });
+    } catch (err) {
+        showToast("AI Assistant error: " + err.message, "danger");
+    } finally {
+        submitBtn.disabled = false;
+    }
+};
+
+
+// --------------------------------------------------------------------------
+// HEALTH TOOLS (BMI, Prescriptions, Water Reminder)
+// --------------------------------------------------------------------------
+window.calculateBMI = function (e) {
+    if (e) e.preventDefault();
+    const height = Number(document.getElementById("heightInput").value);
+    const weight = Number(document.getElementById("weightInput").value);
+    const container = document.getElementById("bmiResultContainer");
+
+    if (height <= 0 || weight <= 0) return;
+    const bmi = (weight / ((height / 100) * (height / 100))).toFixed(1);
+
+    let category = "Normal weight";
+    let badgeClass = "badge-success";
+    if (bmi < 18.5) { category = "Underweight"; badgeClass = "badge-warning"; }
+    else if (bmi >= 25 && bmi < 30) { category = "Overweight"; badgeClass = "badge-warning"; }
+    else if (bmi >= 30) { category = "Obese"; badgeClass = "badge-danger"; }
+
+    container.innerHTML = `
+        <div class="stat-card">
+            <h3>Your BMI Result</h3>
+            <p>${bmi} <span class="badge ${badgeClass}">${category}</span></p>
+        </div>
+    `;
+};
+
+window.addPrescriptionRecord = async function (e) {
+    if (e) e.preventDefault();
+    if (!currentUser) return;
+
+    const doctor = document.getElementById("prescriptionDoctor").value.trim();
+    const medicine = document.getElementById("prescriptionMedicine").value.trim();
+    const date = document.getElementById("prescriptionDate").value;
+    const notes = document.getElementById("prescriptionNotes").value.trim();
+    const fileInput = document.getElementById("prescriptionFile");
+
+    let fileUrl = "";
+    if (fileInput.files && fileInput.files[0]) {
+        const file = fileInput.files[0];
+        try {
+            const sRef = storageRef(storage, `prescriptions/${currentUser.uid}/${Date.now()}_${file.name}`);
+            const snap = await uploadBytes(sRef, file);
+            fileUrl = await getDownloadURL(snap.ref);
+        } catch (stErr) {
+            console.warn("Storage upload fallback to base64 reader:", stErr);
+            fileUrl = await new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (ev) => resolve(ev.target.result);
+                reader.readAsDataURL(file);
+            });
+        }
+    }
+
+    try {
+        await addDoc(collection(db, "users", currentUser.uid, "prescriptions"), {
+            doctor, medicine, date, notes, fileUrl, createdAt: serverTimestamp()
+        });
+        showToast("Prescription record archived! 📄", "success");
+        document.getElementById("prescriptionDoctor").value = "";
+        document.getElementById("prescriptionMedicine").value = "";
+        document.getElementById("prescriptionDate").value = "";
+        document.getElementById("prescriptionNotes").value = "";
+        document.getElementById("prescriptionFile").value = "";
+        loadPrescriptions();
+    } catch (err) { showToast(err.message, "danger"); }
+};
+
+async function loadPrescriptions() {
+    const list = document.getElementById("prescriptionList");
+    if (!list || !currentUser) return;
+    try {
+        const snap = await getDocs(query(collection(db, "users", currentUser.uid, "prescriptions"), orderBy("createdAt", "desc")));
+        if (snap.empty) { list.innerHTML = `<p class="empty-text">No archived prescriptions.</p>`; return; }
+        list.innerHTML = "";
+        snap.forEach(d => {
+            const p = d.data();
+            list.innerHTML += `
+                <div class="medicine-card">
+                    <h3>📄 ${p.medicine}</h3>
+                    <p><b>Doctor:</b> ${p.doctor} | <b>Date:</b> ${p.date}</p>
+                    ${p.notes ? `<p><b>Notes:</b> ${p.notes}</p>` : ""}
+                    ${p.fileUrl ? `<img src="${p.fileUrl}" style="max-width:100%;max-height:200px;margin-top:10px;border-radius:8px;">` : ""}
+                </div>
+            `;
+        });
+    } catch (e) { console.error(e); }
+}
+
+window.startWaterReminder = function () {
+    const intervalMins = Number(document.getElementById("waterInterval").value) || 60;
+    if (waterReminderInterval) clearInterval(waterReminderInterval);
+    waterReminderInterval = setInterval(() => {
+        showToast("💧 Water Reminder: Stay hydrated! Drink a glass of water.", "info", 5000);
+    }, intervalMins * 60 * 1000);
+    showToast(`Water reminder active every ${intervalMins} mins 💧`, "success");
+};
+
+window.stopWaterReminder = function () {
+    if (waterReminderInterval) clearInterval(waterReminderInterval);
+    showToast("Water reminder stopped.", "info");
+};
+
+// --------------------------------------------------------------------------
+// HISTORY & NOTIFICATION CENTER LOGIC
+// --------------------------------------------------------------------------
+function listenHistory() {
+    const q = query(collection(db, "users", currentUser.uid, "history"), orderBy("createdAt", "desc"));
+    unsubscribeHistory = onSnapshot(q, snapshot => {
+        historyItems = [];
+        snapshot.forEach(docSnap => historyItems.push({ id: docSnap.id, ...docSnap.data() }));
+        displayHistory();
+        updateDashboardStats();
+        updateAnalyticsCharts();
+    });
+}
+
+function displayHistory() {
+    const list = document.getElementById("historyList");
+    if (!list) return;
+
+    if (historyItems.length === 0) {
+        list.innerHTML = `<p class="empty-text">No past dose logs.</p>`;
+        return;
+    }
+
+    list.innerHTML = "";
+    historyItems.forEach(h => {
+        list.innerHTML += `
+            <div class="history-card">
+                <span>${h.status} <b>${h.medicineName}</b> at ${formatTime(h.time)}</span>
+            </div>
+        `;
+    });
+}
+
+window.filterHistoryByDate = function () {
+    const filter = document.getElementById("historyFilterDate").value;
+    const now = new Date();
+    displayHistory();
+};
+
+// --------------------------------------------------------------------------
+// UNIFIED ADHERENCE DATA & ANALYTICS COMPUTATION (Bug 3)
+// --------------------------------------------------------------------------
+window.getMedicareAdherenceStats = function() {
+    // 1. Current day (today) calculation
+    let takenToday = 0, pendingToday = 0, missedToday = 0;
+    medicines.forEach(m => {
+        (m.times || []).forEach(t => {
+            if (t.taken) {
+                takenToday++;
+            } else if (t.scheduledForTomorrow) {
+                // Scheduled for tomorrow (next occurrence) - not missed today
+            } else if (t.missed || isMissed(t.time, t)) {
+                missedToday++;
+            } else {
+                pendingToday++;
+            }
+        });
+    });
+
+    const totalToday = takenToday + pendingToday + missedToday;
+    const percentToday = totalToday === 0 ? 0 : Math.round((takenToday / totalToday) * 100);
+
+    // 2. 7-day breakdown from dose history & active medicines
+    const now = new Date();
+    const days = [];
+    const dayLabels = [];
+    let weeklyMissedCount = 0;
+
+    for (let i = 6; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+        const yyyy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, "0");
+        const dd = String(d.getDate()).padStart(2, "0");
+        const dateKey = `${yyyy}-${mm}-${dd}`;
+        const dayName = d.toLocaleDateString([], { weekday: "short" });
+
+        days.push({
+            dateKey,
+            label: dayName,
+            isToday: i === 0,
+            taken: 0,
+            missed: 0,
+            total: 0,
+            adherence: 0
+        });
+        dayLabels.push(dayName);
+    }
+
+    // Populate from historyItems
+    (historyItems || []).forEach(h => {
+        let hDate = null;
+        if (h.createdAt) {
+            if (h.createdAt.toDate) hDate = h.createdAt.toDate();
+            else if (h.createdAt.seconds) hDate = new Date(h.createdAt.seconds * 1000);
+            else if (typeof h.createdAt === "string" || typeof h.createdAt === "number") hDate = new Date(h.createdAt);
+        }
+        if (!hDate || isNaN(hDate.getTime())) return;
+
+        const yyyy = hDate.getFullYear();
+        const mm = String(hDate.getMonth() + 1).padStart(2, "0");
+        const dd = String(hDate.getDate()).padStart(2, "0");
+        const hKey = `${yyyy}-${mm}-${dd}`;
+
+        const bucket = days.find(b => b.dateKey === hKey);
+        if (bucket) {
+            const status = (h.status || "").toLowerCase();
+            if (status.includes("taken") || status.includes("✅")) {
+                bucket.taken++;
+                bucket.total++;
+            } else if (status.includes("missed") || status.includes("skip") || status.includes("❌") || status.includes("⚠️")) {
+                bucket.missed++;
+                bucket.total++;
+                weeklyMissedCount++;
+            }
+        }
+    });
+
+    // Merge today's active medicines with today's bucket
+    const todayBucket = days[days.length - 1];
+    if (todayBucket) {
+        if (takenToday > todayBucket.taken) todayBucket.taken = takenToday;
+        if (missedToday > todayBucket.missed) todayBucket.missed = missedToday;
+        todayBucket.total = todayBucket.taken + todayBucket.missed + pendingToday;
+        weeklyMissedCount = days.reduce((sum, b) => sum + b.missed, 0);
+    }
+
+    // Calculate daily adherence percentage
+    const adherenceTrend = [];
+    const missedOverview = [];
+
+    days.forEach(b => {
+        if (b.total > 0) {
+            b.adherence = Math.round((b.taken / b.total) * 100);
+        } else {
+            b.adherence = 0;
+        }
+        adherenceTrend.push(b.adherence);
+        missedOverview.push(b.missed);
+    });
+
+    const hasData = (historyItems && historyItems.length > 0) || (medicines && medicines.length > 0);
+
+    return {
+        today: {
+            taken: takenToday,
+            pending: pendingToday,
+            missed: missedToday,
+            total: totalToday,
+            percent: percentToday
+        },
+        weekly: {
+            labels: dayLabels,
+            adherenceTrend,
+            missedOverview,
+            totalMissed: weeklyMissedCount
+        },
+        hasData
     };
 };
 
-function fillMedicineFromVoice(command) {
-    let medicineName = "";
-    let timeValue = "";
+function updateDashboardStats() {
+    const stats = window.getMedicareAdherenceStats();
+    const today = stats.today;
 
-    let cleaned = command
-        .replace("add", "")
-        .replace("medicine", "")
-        .replace("tablet", "")
-        .replace("capsule", "")
-        .replace("syrup", "")
-        .trim();
+    const todayAdh = document.getElementById("todayAdherence");
+    if (todayAdh) todayAdh.innerText = `${today.percent}%`;
+    const totMed = document.getElementById("totalMedicines");
+    if (totMed) totMed.innerText = medicines.length;
+    const takenMed = document.getElementById("takenMedicines");
+    if (takenMed) takenMed.innerText = today.taken;
+    const pendMed = document.getElementById("pendingMedicines");
+    if (pendMed) pendMed.innerText = today.pending;
+    const missMed = document.getElementById("missedMedicines");
+    if (missMed) missMed.innerText = today.missed;
+    const progFill = document.getElementById("progressFill");
+    if (progFill) progFill.style.width = `${today.percent}%`;
+    const progText = document.getElementById("progressText");
+    if (progText) progText.innerText = `${today.percent}% completed today`;
 
-    const timeMatch = cleaned.match(/at\s+(.+)/);
-
-    if (timeMatch) {
-        medicineName = cleaned.split("at")[0].trim();
-        timeValue = convertVoiceTimeTo24Hour(timeMatch[1].trim());
-    } else {
-        medicineName = cleaned.trim();
+    // Progress Ring offset
+    const circle = document.getElementById("adherenceCircle");
+    if (circle) {
+        const circumference = 2 * Math.PI * 40; // 251.2
+        const offset = circumference - (today.percent / 100) * circumference;
+        circle.style.strokeDashoffset = offset;
     }
 
-    if (medicineName !== "") {
-        document.getElementById("medicineName").value =
-            capitalizeWords(medicineName);
+    // Low stock alerts
+    const alertsContainer = document.getElementById("dashboardStockAlerts");
+    if (alertsContainer) {
+        const lowStockMeds = medicines.filter(m => m.stock <= 3);
+        if (lowStockMeds.length > 0) {
+            alertsContainer.innerHTML = lowStockMeds.map(m => `
+                <div class="toast toast-warning" style="margin-bottom:12px;">
+                    ⚠️ Low Stock Warning: <b>${m.name}</b> has only ${m.stock} doses remaining!
+                </div>
+            `).join("");
+        } else {
+            alertsContainer.innerHTML = "";
+        }
     }
 
-    if (command.includes("syrup")) {
-        document.getElementById("medicineCategory").value = "Syrup";
-    } else if (command.includes("injection")) {
-        document.getElementById("medicineCategory").value = "Injection";
-    } else if (command.includes("drops")) {
-        document.getElementById("medicineCategory").value = "Drops";
-    } else {
-        document.getElementById("medicineCategory").value = "Tablet";
-    }
-
-    if (timeValue !== "") {
-        document.getElementById("timeInputs").innerHTML =
-            `<input type="time" class="medicineTime" value="${timeValue}">`;
-    }
-
-    const stockMatch = command.match(/stock\s+(\d+)/);
-
-    if (stockMatch) {
-        document.getElementById("medicineStock").value = stockMatch[1];
-    }
-
-    alert("Medicine form filled from voice ✅");
+    updateNextDoseCountdown();
 }
 
-function convertVoiceTimeTo24Hour(timeText) {
-    timeText = timeText
-        .replace(".", "")
-        .replace("a m", "am")
-        .replace("p m", "pm")
-        .replace("a.m", "am")
-        .replace("p.m", "pm")
-        .trim();
+function updateNextDoseCountdown() {
+    const textEl = document.getElementById("nextDoseText");
+    const countEl = document.getElementById("nextDoseCountdown");
+    if (!textEl) return;
 
-    let hour = 0;
-    let minute = 0;
+    let next = null;
+    const now = new Date();
+    const currentMins = now.getHours() * 60 + now.getMinutes();
 
-    const hasPM =
-        timeText.includes("pm") ||
-        timeText.includes("evening") ||
-        timeText.includes("night");
+    medicines.forEach(m => {
+        m.times.forEach(t => {
+            if (!t.taken && !t.missed && !t.scheduledForTomorrow) {
+                const [h, min] = t.time.split(":").map(Number);
+                const doseMins = h * 60 + min;
+                if (doseMins >= currentMins) {
+                    if (!next || doseMins < next.mins) next = { name: m.name, time: t.time, mins: doseMins };
+                }
+            }
+        });
+    });
 
-    const hasAM =
-        timeText.includes("am") ||
-        timeText.includes("morning");
+    if (next) {
+        textEl.innerText = `${next.name} at ${formatTime(next.time)}`;
+        const diffMins = next.mins - currentMins;
+        const hrs = Math.floor(diffMins / 60);
+        const mins = diffMins % 60;
+        countEl.innerText = `in ${hrs > 0 ? hrs + "h " : ""}${mins}m`;
+    } else {
+        textEl.innerText = "No upcoming dose today 🎉";
+        countEl.innerText = "";
+    }
+}
 
-    timeText = timeText
-        .replace("am", "")
-        .replace("pm", "")
-        .replace("morning", "")
-        .replace("evening", "")
-        .replace("night", "")
-        .trim();
+function updateAnalyticsCharts() {
+    const stats = window.getMedicareAdherenceStats();
 
-    const numberMatch = timeText.match(/\d+/g);
+    // 1. Update stats cards with identical figures from unified data function
+    const adhPct = document.getElementById("adherencePercent");
+    if (adhPct) adhPct.innerText = `${stats.today.percent}%`;
 
-    if (!numberMatch) {
-        return "";
+    const missedWk = document.getElementById("missedThisWeek");
+    if (missedWk) missedWk.innerText = stats.weekly.totalMissed;
+
+    const appCount = document.getElementById("appointmentCount");
+    if (appCount) appCount.innerText = appointments.length;
+
+    const docCount = document.getElementById("doctorCount");
+    if (docCount) docCount.innerText = doctors.length;
+
+    // 2. Friendly empty state vs. Chart render
+    const chartsContainer = document.getElementById("analyticsChartsContainer");
+    const emptyStateEl = document.getElementById("analyticsEmptyState");
+
+    if (!stats.hasData) {
+        if (chartsContainer) chartsContainer.classList.add("hidden");
+        if (emptyStateEl) emptyStateEl.classList.remove("hidden");
+        return;
     }
 
-    hour = Number(numberMatch[0]);
+    if (chartsContainer) chartsContainer.classList.remove("hidden");
+    if (emptyStateEl) emptyStateEl.classList.add("hidden");
 
-    if (numberMatch.length > 1) {
-        minute = Number(numberMatch[1]);
+    const adherenceCtx = document.getElementById("weeklyAdherenceChart")?.getContext("2d");
+    const missedCtx = document.getElementById("missedDosesChart")?.getContext("2d");
+
+    if (adherenceCtx) {
+        if (weeklyAdherenceChartInstance) weeklyAdherenceChartInstance.destroy();
+        weeklyAdherenceChartInstance = new Chart(adherenceCtx, {
+            type: "line",
+            data: {
+                labels: stats.weekly.labels,
+                datasets: [{
+                    label: "Adherence %",
+                    data: stats.weekly.adherenceTrend,
+                    borderColor: "#5b5ce2",
+                    backgroundColor: "rgba(91, 92, 226, 0.1)",
+                    fill: true,
+                    tension: 0.3
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: {
+                    y: { min: 0, max: 100 }
+                }
+            }
+        });
     }
 
-    if (hasPM && hour < 12) {
-        hour += 12;
+    if (missedCtx) {
+        if (missedDosesChartInstance) missedDosesChartInstance.destroy();
+        missedDosesChartInstance = new Chart(missedCtx, {
+            type: "bar",
+            data: {
+                labels: stats.weekly.labels,
+                datasets: [{
+                    label: "Missed Doses",
+                    data: stats.weekly.missedOverview,
+                    backgroundColor: "#ef4444"
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: {
+                    y: { beginAtZero: true, ticks: { stepSize: 1 } }
+                }
+            }
+        });
+    }
+}
+
+// --------------------------------------------------------------------------
+// DUPLICATE HELPER & CLEAR OLD HISTORY (Bug 4)
+// --------------------------------------------------------------------------
+window.checkAndHandleDuplicates = async function () {
+    if (!currentUser) return;
+
+    const groups = {};
+    medicines.forEach(m => {
+        const timeKey = (m.times || []).map(t => t.time).sort().join(",");
+        const key = `${(m.name || "").trim().toLowerCase()}__${(m.dosage || "").trim().toLowerCase()}__${m.familyMemberId || ""}__${timeKey}`;
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(m);
+    });
+
+    const duplicateGroups = Object.values(groups).filter(g => g.length > 1);
+
+    if (duplicateGroups.length === 0) {
+        showToast("No duplicate medicines found! All medicines are unique. ✨", "info");
+        return;
     }
 
-    if (hasAM && hour === 12) {
-        hour = 0;
-    }
+    const modal = document.getElementById("duplicateModal");
+    const container = document.getElementById("duplicateListContainer");
+    const cancelBtn = document.getElementById("duplicateCancelBtn");
+    const deleteBtn = document.getElementById("duplicateDeleteBtn");
+    const mergeBtn = document.getElementById("duplicateMergeBtn");
 
-    return (
-        hour.toString().padStart(2, "0") +
-        ":" +
-        minute.toString().padStart(2, "0")
+    if (!modal || !container) return;
+
+    let html = "";
+    duplicateGroups.forEach(group => {
+        const prim = group[0];
+        const timesStr = (prim.times || []).map(t => t.time).join(", ");
+        const totalStock = group.reduce((sum, item) => sum + (item.stock || 0), 0);
+        html += `
+            <div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius-md);padding:10px 14px;margin-bottom:8px;">
+                <p style="margin:0 0 4px 0;font-weight:600;">💊 ${prim.name} (${prim.dosage || 'No dose'}) - ${timesStr}</p>
+                <p style="margin:0;font-size:12px;color:var(--text-secondary);">
+                    Found <b>${group.length} copies</b> for ${prim.familyMemberName || 'Self'}. Combined stock: ${totalStock}
+                </p>
+            </div>
+        `;
+    });
+    container.innerHTML = html;
+    modal.classList.remove("hidden");
+
+    const cleanup = () => {
+        modal.classList.add("hidden");
+        cancelBtn.onclick = null;
+        deleteBtn.onclick = null;
+        mergeBtn.onclick = null;
+    };
+
+    cancelBtn.onclick = cleanup;
+
+    deleteBtn.onclick = async () => {
+        cleanup();
+        let deleted = 0;
+        try {
+            for (const group of duplicateGroups) {
+                for (let i = 1; i < group.length; i++) {
+                    await deleteDoc(doc(db, "users", currentUser.uid, "medicines", group[i].id));
+                    deleted++;
+                }
+            }
+            showToast(`Deleted ${deleted} duplicate medicine copies. Primary schedules kept.`, "success");
+        } catch (e) {
+            showToast("Error deleting duplicates: " + e.message, "danger");
+        }
+    };
+
+    mergeBtn.onclick = async () => {
+        cleanup();
+        let merged = 0;
+        try {
+            for (const group of duplicateGroups) {
+                const prim = group[0];
+                const combinedStock = group.reduce((sum, item) => sum + (item.stock || 0), 0);
+                await updateDoc(doc(db, "users", currentUser.uid, "medicines", prim.id), { stock: combinedStock });
+                for (let i = 1; i < group.length; i++) {
+                    await deleteDoc(doc(db, "users", currentUser.uid, "medicines", group[i].id));
+                }
+                merged++;
+            }
+            showToast(`Merged ${merged} duplicate group(s) with combined stocks!`, "success");
+        } catch (e) {
+            showToast("Error merging duplicates: " + e.message, "danger");
+        }
+    };
+};
+
+window.clearOldHistory = async function () {
+    if (!currentUser) return;
+    const confirmClear = await showConfirmModal(
+        "Clear Old History",
+        "Delete all missed/skipped dose logs older than 7 days?"
     );
+    if (!confirmClear) return;
+
+    try {
+        const historyRef = collection(db, "users", currentUser.uid, "history");
+        const snap = await getDocs(historyRef);
+        const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+        let deleteCount = 0;
+        const deletePromises = [];
+
+        snap.forEach(dSnap => {
+            const data = dSnap.data();
+            let millis = null;
+            if (data.createdAt?.toMillis) millis = data.createdAt.toMillis();
+            else if (data.createdAt?.seconds) millis = data.createdAt.seconds * 1000;
+            else if (data.createdAt) millis = new Date(data.createdAt).getTime();
+
+            const status = (data.status || "").toLowerCase();
+            const isMissedOrSkipped = status.includes("miss") || status.includes("skip") || status.includes("❌") || status.includes("⚠️");
+
+            if (isMissedOrSkipped && millis && millis < sevenDaysAgo) {
+                deleteCount++;
+                deletePromises.push(deleteDoc(doc(db, "users", currentUser.uid, "history", dSnap.id)));
+            }
+        });
+
+        await Promise.all(deletePromises);
+        showToast(deleteCount > 0 ? `Cleared ${deleteCount} missed dose log(s) older than 7 days.` : "No missed dose logs older than 7 days found.", "info");
+    } catch (e) {
+        showToast("Error clearing old history: " + e.message, "danger");
+    }
+};
+
+// Printable PDF Health Report Generator
+window.downloadHealthReport = function () {
+    if (!currentUserData) {
+        showToast("User profile not loaded yet.", "warning");
+        return;
+    }
+
+    try {
+        if (!window.jspdf || !window.jspdf.jsPDF) {
+            showToast("PDF generator library loading... Please try again in a moment.", "warning");
+            return;
+        }
+
+        const { jsPDF } = window.jspdf;
+        const docPdf = new jsPDF();
+
+        let y = 15;
+        docPdf.setFontSize(18);
+        docPdf.setTextColor(91, 92, 226); // Brand Purple #5b5ce2
+        docPdf.text("MediCare Patient Health Report", 14, y);
+
+        y += 8;
+        docPdf.setFontSize(10);
+        docPdf.setTextColor(100, 100, 100);
+        docPdf.text(`Generated: ${new Date().toLocaleString()}`, 14, y);
+
+        y += 10;
+        docPdf.setFontSize(12);
+        docPdf.setTextColor(30, 30, 30);
+        docPdf.text(`Patient Name: ${currentUserData.name || "Patient"}`, 14, y);
+        y += 6;
+        docPdf.text(`Email: ${currentUserData.email || ""}`, 14, y);
+        y += 6;
+        docPdf.text(`Caregiver Code: ${currentUserData.caregiverCode || "N/A"}`, 14, y);
+
+        y += 10;
+        docPdf.setFontSize(14);
+        docPdf.setTextColor(91, 92, 226);
+        docPdf.text("Adherence & Health Summary", 14, y);
+
+        y += 6;
+        docPdf.setFontSize(11);
+        docPdf.setTextColor(50, 50, 50);
+        const adherenceText = document.getElementById("todayAdherence")?.innerText || "0%";
+        const streakText = document.getElementById("streakCounter")?.innerText || "0 Days";
+        docPdf.text(`Today's Adherence Rate: ${adherenceText}`, 14, y);
+        y += 6;
+        docPdf.text(`Current Adherence Streak: ${streakText}`, 14, y);
+
+        y += 10;
+        docPdf.setFontSize(14);
+        docPdf.setTextColor(91, 92, 226);
+        docPdf.text("Family Members", 14, y);
+
+        y += 6;
+        docPdf.setFontSize(11);
+        docPdf.setTextColor(50, 50, 50);
+        if (familyMembers.length === 0) {
+            docPdf.text("No family members registered.", 14, y);
+            y += 6;
+        } else {
+            familyMembers.forEach(fm => {
+                docPdf.text(`• ${fm.name} (${fm.relation})`, 14, y);
+                y += 6;
+            });
+        }
+
+        y += 6;
+        docPdf.setFontSize(14);
+        docPdf.setTextColor(91, 92, 226);
+        docPdf.text("Active Medicines", 14, y);
+
+        y += 6;
+        docPdf.setFontSize(10);
+        docPdf.setTextColor(50, 50, 50);
+        if (medicines.length === 0) {
+            docPdf.text("No active medicines listed.", 14, y);
+            y += 6;
+        } else {
+            medicines.forEach(m => {
+                const timesStr = (m.times || []).map(t => t.time).join(", ");
+                docPdf.text(`• ${m.name} | Dosage: ${m.dosage || '1 dose'} | Stock: ${m.stock} | Doses: ${timesStr}`, 14, y);
+                y += 6;
+            });
+        }
+
+        y += 6;
+        docPdf.setFontSize(14);
+        docPdf.setTextColor(91, 92, 226);
+        docPdf.text("Scheduled Consultations", 14, y);
+
+        y += 6;
+        docPdf.setFontSize(10);
+        docPdf.setTextColor(50, 50, 50);
+        if (appointments.length === 0) {
+            docPdf.text("No upcoming consultations.", 14, y);
+            y += 6;
+        } else {
+            appointments.forEach(a => {
+                docPdf.text(`• Dr. ${a.doctor} at ${a.hospital || 'Clinic'} on ${a.date} at ${a.time}`, 14, y);
+                y += 6;
+            });
+        }
+
+        const fileName = `MediCare_Health_Report_${(currentUserData?.name || 'Patient').replace(/\s+/g, '_')}_${Date.now()}.pdf`;
+        docPdf.save(fileName);
+        showToast("PDF Health Report downloaded! 📄", "success");
+    } catch (e) {
+        showToast("Failed to generate PDF: " + e.message, "danger");
+    }
+};
+
+// --------------------------------------------------------------------------
+// SECTION B: SPOKEN REMINDERS SYSTEM & WEB SPEECH API
+// --------------------------------------------------------------------------
+let speechUtterance = null;
+let repeatSpeechTimeout = null;
+let currentAlertedDoseKey = null;
+let speechUnlocked = false;
+
+let speechSettings = {
+    enabled: true,
+    language: "en-IN",
+    volume: 1.0,
+    rate: 1.0,
+    useAI: false
+};
+
+function loadSpeechSettings() {
+    try {
+        const saved = localStorage.getItem("medicare_speech_settings");
+        if (saved) {
+            speechSettings = Object.assign(speechSettings, JSON.parse(saved));
+        }
+    } catch (e) {}
+
+    const toggle = document.getElementById("speakRemindersToggle");
+    const langSel = document.getElementById("voiceLanguageSelect");
+    const vol = document.getElementById("voiceVolume");
+    const rate = document.getElementById("voiceRate");
+    const aiToggle = document.getElementById("aiReminderPhraseToggle");
+
+    if (toggle) toggle.checked = speechSettings.enabled;
+    if (langSel) langSel.value = speechSettings.language;
+    if (vol) {
+        vol.value = Math.round(speechSettings.volume * 100);
+        const volVal = document.getElementById("voiceVolumeVal");
+        if (volVal) volVal.innerText = vol.value;
+    }
+    if (rate) {
+        rate.value = speechSettings.rate;
+        const rateVal = document.getElementById("voiceRateVal");
+        if (rateVal) rateVal.innerText = rate.value;
+    }
+    if (aiToggle) aiToggle.checked = speechSettings.useAI;
 }
 
-function capitalizeWords(text) {
-    return text.replace(/\b\w/g, char => char.toUpperCase());
+// Initial speech settings load
+loadSpeechSettings();
+
+window.updateSpeechSettings = function () {
+    const toggle = document.getElementById("speakRemindersToggle");
+    const langSel = document.getElementById("voiceLanguageSelect");
+    const vol = document.getElementById("voiceVolume");
+    const rate = document.getElementById("voiceRate");
+    const aiToggle = document.getElementById("aiReminderPhraseToggle");
+
+    if (toggle) speechSettings.enabled = toggle.checked;
+    if (langSel) speechSettings.language = langSel.value;
+    if (vol) {
+        speechSettings.volume = parseFloat(vol.value) / 100;
+        const volVal = document.getElementById("voiceVolumeVal");
+        if (volVal) volVal.innerText = vol.value;
+    }
+    if (rate) {
+        speechSettings.rate = parseFloat(rate.value);
+        const rateVal = document.getElementById("voiceRateVal");
+        if (rateVal) rateVal.innerText = rate.value;
+    }
+    if (aiToggle) speechSettings.useAI = aiToggle.checked;
+
+    try {
+        localStorage.setItem("medicare_speech_settings", JSON.stringify(speechSettings));
+    } catch (e) {}
+};
+
+function unlockSpeechAudio() {
+    if (speechUnlocked) return;
+    if (!("speechSynthesis" in window)) return;
+    try {
+        const dummy = new SpeechSynthesisUtterance("");
+        dummy.volume = 0;
+        window.speechSynthesis.speak(dummy);
+        speechUnlocked = true;
+        console.log("[SpeechSynthesis] Speech audio unlocked via user interaction.");
+    } catch (e) {}
 }
+document.addEventListener("click", unlockSpeechAudio, { capture: true });
+
+function getBestVoice(langCode) {
+    if (!("speechSynthesis" in window)) return null;
+    const voices = window.speechSynthesis.getVoices() || [];
+    if (voices.length === 0) return null;
+
+    const targetLang = (langCode || "en-IN").toLowerCase().replace("_", "-");
+    const baseLang = targetLang.split("-")[0];
+
+    // 1. Exact match (e.g. en-in, te-in, hi-in)
+    let voice = voices.find(v => v.lang.toLowerCase().replace("_", "-") === targetLang);
+    if (voice) return voice;
+
+    // 2. Base language match (e.g. te, hi)
+    voice = voices.find(v => v.lang.toLowerCase().startsWith(baseLang));
+    if (voice) return voice;
+
+    // 3. Fallback to English voice (e.g. en-US, en-GB, or any en)
+    voice = voices.find(v => v.lang.toLowerCase().startsWith("en"));
+    if (voice) return voice;
+
+    // 4. Default voice
+    return voices[0];
+}
+
+window.speakReminderText = function (text) {
+    if (!speechSettings.enabled) return;
+    if (!("speechSynthesis" in window)) {
+        console.warn("speechSynthesis API not supported");
+        return;
+    }
+
+    try {
+        window.speechSynthesis.cancel();
+
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.volume = speechSettings.volume;
+        utterance.rate = speechSettings.rate;
+
+        const voice = getBestVoice(speechSettings.language);
+        if (voice) {
+            utterance.voice = voice;
+            utterance.lang = voice.lang;
+        }
+
+        utterance.onerror = function (event) {
+            console.warn("[SpeechSynthesis] Error:", event.error);
+            if (event.error === "not-allowed") {
+                showToast("Spoken reminders blocked by browser audio policy. Click anywhere on the page to unblock speech.", "warning");
+            }
+        };
+
+        window.speechSynthesis.speak(utterance);
+    } catch (err) {
+        console.warn("[SpeechSynthesis] Speak failure:", err);
+    }
+};
+
+window.speakConfirmation = function (text) {
+    if (speechSettings.enabled) {
+        speakReminderText(text);
+    }
+};
+
+window.clearSpeechRepeatTimer = function () {
+    if (repeatSpeechTimeout) {
+        clearTimeout(repeatSpeechTimeout);
+        repeatSpeechTimeout = null;
+    }
+    currentAlertedDoseKey = null;
+};
+
+window.testVoiceReminder = function () {
+    unlockSpeechAudio();
+    const name = currentUserData?.name || "Bhavya";
+    const sampleMsg = `${name}, this is a test of MediCare spoken reminders. Stay healthy!`;
+    const statusEl = document.getElementById("speechStatusMessage");
+
+    const voice = getBestVoice(speechSettings.language);
+    if (statusEl) {
+        statusEl.innerText = voice ? `Using voice: ${voice.name} (${voice.lang})` : "Using default browser voice.";
+    }
+
+    speakReminderText(sampleMsg);
+    showToast("Playing test voice reminder...", "info");
+};
+
+// --------------------------------------------------------------------------
+// VOICE ASSISTANT & TWO-STEP PARSER
+// --------------------------------------------------------------------------
+let recognition = null;
+let isVoiceListening = false;
+
+window.toggleVoiceAssistant = function () {
+    unlockSpeechAudio();
+    if (isVoiceListening) {
+        stopVoiceAssistant();
+    } else {
+        startVoiceAssistant();
+    }
+};
+
+window.startVoiceAssistant = async function () {
+    const textEl = document.getElementById("voiceText");
+    const btn = document.getElementById("voiceBtn");
+
+    if (!window.isSecureContext) {
+        const msg = "Voice and notifications need HTTPS or localhost.";
+        if (textEl) textEl.innerText = msg;
+        showToast(msg, "warning");
+        return;
+    }
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+        const msg = "Speech Recognition API is not supported in this browser. Please use Google Chrome or Edge.";
+        if (textEl) textEl.innerText = msg;
+        showToast(msg, "warning");
+        return;
+    }
+
+    try {
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+            await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
+    } catch (permErr) {
+        console.warn("Mic permission error:", permErr);
+        const msg = "Microphone access denied. Please allow microphone permissions in your browser address bar.";
+        if (textEl) textEl.innerText = msg;
+        showToast(msg, "danger");
+        return;
+    }
+
+    try {
+        recognition = new SpeechRecognition();
+        const langSelect = document.getElementById("voiceLanguage");
+        recognition.lang = langSelect ? langSelect.value : "en-IN";
+        recognition.continuous = false;
+        recognition.interimResults = true;
+
+        recognition.onstart = function () {
+            isVoiceListening = true;
+            if (btn) {
+                btn.innerText = "🛑 Stop Voice Input";
+                btn.style.background = "var(--danger-color)";
+                btn.style.color = "#fff";
+            }
+            if (textEl) textEl.innerText = "Listening... Speak your command now (e.g. 'Add Dolo 650 at 8 PM stock 15').";
+        };
+
+        recognition.onresult = function (event) {
+            let transcript = "";
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                transcript += event.results[i][0].transcript;
+            }
+
+            // Always display raw transcript in the voice text box so user sees what was heard
+            if (textEl) textEl.innerText = transcript;
+
+            const isFinal = event.results[event.results.length - 1].isFinal;
+            if (isFinal && transcript.trim()) {
+                processVoiceCommand(transcript.trim());
+            }
+        };
+
+        recognition.onerror = function (event) {
+            console.error("Speech recognition error:", event.error);
+            let errMsg = "Voice input error: " + event.error;
+            if (event.error === "not-allowed") errMsg = "Microphone permission blocked. Please unblock mic in address bar.";
+            else if (event.error === "no-speech") errMsg = "No speech detected. Please try speaking again.";
+            else if (event.error === "audio-capture") errMsg = "No microphone hardware found.";
+            else if (event.error === "network") errMsg = "Network connection error during speech recognition.";
+
+            if (textEl) textEl.innerText = errMsg;
+            showToast(errMsg, "danger");
+            stopVoiceAssistant();
+        };
+
+        recognition.onend = function () {
+            stopVoiceAssistant();
+        };
+
+        recognition.start();
+    } catch (e) {
+        showToast("Failed to start speech recognition: " + e.message, "danger");
+        stopVoiceAssistant();
+    }
+};
+
+function stopVoiceAssistant() {
+    isVoiceListening = false;
+    if (recognition) {
+        try { recognition.stop(); } catch (e) {}
+        recognition = null;
+    }
+    const btn = document.getElementById("voiceBtn");
+    if (btn) {
+        btn.innerText = "🎤 Start Voice Input";
+        btn.style.background = "";
+        btn.style.color = "";
+    }
+}
+
+// --------------------------------------------------------------------------
+// VOICE TRANSCRIPT NORMALIZATION, FUZZY MEDICINE MATCHER & PARSER (Bug 2)
+// --------------------------------------------------------------------------
+const COMMON_MEDICINES = [
+    "dolo", "crocin", "paracetamol", "azithromycin", "metformin",
+    "pantoprazole", "cetirizine", "amoxicillin", "aspirin", "ibuprofen",
+    "omeprazole", "atorvastatin", "amlodipine", "losartan", "metoprolol",
+    "augmentin", "combiflam", "calpol"
+];
+
+const SPEECH_MISHEARING_MAP = {
+    "download": "dolo",
+    "dollar": "dolo",
+    "dollo": "dolo",
+    "dolu": "dolo",
+    "croaking": "crocin",
+    "crow scene": "crocin",
+    "croissant": "crocin",
+    "parasite mall": "paracetamol",
+    "parasitic mall": "paracetamol",
+    "paracitamol": "paracetamol",
+    "parasitemol": "paracetamol",
+    "panto": "pantoprazole",
+    "pantop": "pantoprazole",
+    "azithro": "azithromycin",
+    "as it through": "azithromycin",
+    "amox": "amoxicillin",
+    "a moxie": "amoxicillin"
+};
+
+function levenshteinDistance(s1, s2) {
+    const a = (s1 || "").toLowerCase(), b = (s2 || "").toLowerCase();
+    const costs = [];
+    for (let i = 0; i <= a.length; i++) {
+        let lastValue = i;
+        for (let j = 0; j <= b.length; j++) {
+            if (i === 0) costs[j] = j;
+            else if (j > 0) {
+                let newValue = costs[j - 1];
+                if (a.charAt(i - 1) !== b.charAt(j - 1)) {
+                    newValue = Math.min(Math.min(newValue, lastValue), costs[j]) + 1;
+                }
+                costs[j - 1] = lastValue;
+                lastValue = newValue;
+            }
+        }
+        if (i > 0) costs[b.length] = lastValue;
+    }
+    return costs[b.length];
+}
+
+function stringSimilarity(s1, s2) {
+    const maxLen = Math.max(s1.length, s2.length);
+    if (maxLen === 0) return 1.0;
+    return (maxLen - levenshteinDistance(s1, s2)) / maxLen;
+}
+
+function wordsToNumbers(text) {
+    if (!text) return "";
+    const numMap = {
+        "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+        "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+        "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+        "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90
+    };
+
+    let s = text;
+    s = s.replace(/\bsix\s+hundred\s+(?:and\s+)?fifty\b/gi, "650");
+    s = s.replace(/\bsix\s+fifty\b/gi, "650");
+    s = s.replace(/\bfive\s+hundred\b/gi, "500");
+    s = s.replace(/\bone\s+thousand\b/gi, "1000");
+
+    for (const [w, n] of Object.entries(numMap)) {
+        const regex = new RegExp(`\\b${w}\\b`, "gi");
+        s = s.replace(regex, n.toString());
+    }
+    return s;
+}
+
+function matchCommonMedicine(token) {
+    if (!token) return token;
+    const clean = token.toLowerCase().trim();
+    if (SPEECH_MISHEARING_MAP[clean]) {
+        const mapped = SPEECH_MISHEARING_MAP[clean];
+        return mapped.charAt(0).toUpperCase() + mapped.slice(1);
+    }
+    let best = null;
+    let highestSim = 0;
+    for (const med of COMMON_MEDICINES) {
+        const sim = stringSimilarity(clean, med);
+        if (sim > highestSim) {
+            highestSim = sim;
+            best = med;
+        }
+    }
+    if (highestSim >= 0.55 && best) {
+        return best.charAt(0).toUpperCase() + best.slice(1);
+    }
+    return token.charAt(0).toUpperCase() + token.slice(1);
+}
+
+window.normaliseVoiceTranscript = function(raw) {
+    if (!raw) return "";
+    let s = raw.trim();
+
+    // Standardize meridiem punctuation
+    s = s.replace(/p\.m\./gi, "pm").replace(/a\.m\./gi, "am");
+    s = s.replace(/\bp\s+m\b/gi, "pm").replace(/\ba\s+m\b/gi, "am");
+
+    // Convert number words
+    s = wordsToNumbers(s);
+
+    // Look for misheard pattern where "650 at 8 pm" was heard as "658 pm" or "658 p.m."
+    s = s.replace(/\b(\d{2,3})(8|9|10|11|12|[1-7])\s*(pm|am)\b/gi, (match, prefix, hr, meridiem) => {
+        if (prefix === "65" || prefix === "650" || prefix === "50" || prefix === "25") {
+            const actualPrefix = prefix.length === 2 ? prefix + "0" : prefix;
+            return `${actualPrefix} at ${hr} ${meridiem}`;
+        }
+        return match;
+    });
+
+    // Check direct mishearing dictionary
+    for (const [misheard, corrected] of Object.entries(SPEECH_MISHEARING_MAP)) {
+        const re = new RegExp(`\\b${misheard}\\b`, "gi");
+        s = s.replace(re, corrected);
+    }
+
+    return s;
+};
+
+window.parseVoiceLocally = function(transcript) {
+    if (!transcript || typeof transcript !== "string") return null;
+
+    const normalised = window.normaliseVoiceTranscript(transcript);
+    const lower = normalised.toLowerCase();
+
+    // 1. Stock parsing: "stock 15", "quantity 15", "15 tablets", "15 pieces", "15 pills"
+    // Bug 2(b): Do NOT default silently to 10
+    let stock = null;
+    let stockSubstring = "";
+    const stockMatch = normalised.match(/(?:stock|quantity|count)\s*(\d+)|\b(\d+)\s*(?:tablets?|capsules?|pills?|pieces?|units?|strips?|doses?)\b/i);
+    if (stockMatch) {
+        stock = parseInt(stockMatch[1] || stockMatch[2]);
+        stockSubstring = stockMatch[0];
+    }
+
+    // 2. Dosage parsing: "650 mg", "500mg", "1 tablet", etc.
+    let dosage = "";
+    // Check if medicine is immediately followed by strength (e.g. Metformin 500, Dolo 650, Crocin 500)
+    const medStrengthMatch = normalised.match(/\b(?:dolo|crocin|paracetamol|azithromycin|metformin|pantoprazole|cetirizine|amoxicillin|[a-zA-Z]+)\s+(\d{2,4})\s*(mg|g|ml|mcg)?\b/i);
+    if (medStrengthMatch) {
+        const num = medStrengthMatch[1];
+        const unit = medStrengthMatch[2] || "mg";
+        dosage = `${num} ${unit}`;
+    } else {
+        const mgMatch = normalised.match(/(\d+\s*(?:mg|g|ml|mcg))\b/i);
+        if (mgMatch) {
+            dosage = mgMatch[1].trim();
+        } else {
+            const otherDoseMatch = normalised.match(/(\d+\s*(?:tablets?|capsules?|pills?|pieces?|drops?|dose))\b/i);
+            if (otherDoseMatch && (!stockSubstring || otherDoseMatch[0].toLowerCase() !== stockSubstring.toLowerCase())) {
+                dosage = otherDoseMatch[1].trim();
+            }
+        }
+    }
+
+    // 3. Time & Meridiem Parsing: Bug 2(a)
+    // "8 p.m.", "8 PM", "eight pm", "8 in the evening/night" must give 20:00
+    // Only use AM when AM or morning is said. If no meridiem is spoken, flag meridiemAmbiguous.
+    let times = [];
+    let meridiemAmbiguous = false;
+
+    // Direct AM/PM: e.g. "8 pm", "8:30 pm", "8 am"
+    const ampmMatch = normalised.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
+    if (ampmMatch) {
+        let hrs = parseInt(ampmMatch[1]);
+        const mins = ampmMatch[2] ? parseInt(ampmMatch[2]) : 0;
+        const ampm = ampmMatch[3].toLowerCase();
+        if (ampm === "pm" && hrs < 12) hrs += 12;
+        if (ampm === "am" && hrs === 12) hrs = 0;
+        times.push(`${hrs.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}`);
+    }
+
+    // Evening / Night phrases: e.g. "8 in the evening", "8 in the night", "8 at night"
+    if (times.length === 0) {
+        const eveMatch = normalised.match(/(\d{1,2})(?::(\d{2}))?\s*(?:in the|at)?\s*(evening|night|bedtime)\b/i);
+        if (eveMatch) {
+            let hrs = parseInt(eveMatch[1]);
+            const mins = eveMatch[2] ? parseInt(eveMatch[2]) : 0;
+            if (hrs < 12) hrs += 12;
+            times.push(`${hrs.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}`);
+        }
+    }
+
+    // Morning phrases: e.g. "8 in the morning", "8 morning"
+    if (times.length === 0) {
+        const mornMatch = normalised.match(/(\d{1,2})(?::(\d{2}))?\s*(?:in the|at)?\s*(morning)\b/i);
+        if (mornMatch) {
+            let hrs = parseInt(mornMatch[1]);
+            const mins = mornMatch[2] ? parseInt(mornMatch[2]) : 0;
+            if (hrs === 12) hrs = 0;
+            times.push(`${hrs.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}`);
+        }
+    }
+
+    // Afternoon phrases: e.g. "1 in the afternoon", "2 afternoon"
+    if (times.length === 0) {
+        const aftMatch = normalised.match(/(\d{1,2})(?::(\d{2}))?\s*(?:in the|at)?\s*(afternoon)\b/i);
+        if (aftMatch) {
+            let hrs = parseInt(aftMatch[1]);
+            const mins = aftMatch[2] ? parseInt(aftMatch[2]) : 0;
+            if (hrs < 12) hrs += 12;
+            times.push(`${hrs.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}`);
+        }
+    }
+
+    // Time specified without any meridiem: e.g. "at 8", "at 8:30"
+    if (times.length === 0) {
+        const plainAtMatch = normalised.match(/\b(?:at|around)\s*(\d{1,2})(?::(\d{2}))?\b/i);
+        if (plainAtMatch) {
+            let hrs = parseInt(plainAtMatch[1]);
+            const mins = plainAtMatch[2] ? parseInt(plainAtMatch[2]) : 0;
+            meridiemAmbiguous = true;
+            // Only use AM when AM or morning is said. If no meridiem is spoken, ask in dialog and default to 20:00
+            if (hrs < 12) hrs += 12;
+            times.push(`${hrs.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}`);
+        }
+    }
+
+    // Keyword fallbacks
+    if (times.length === 0) {
+        if (lower.includes("morning") && (lower.includes("night") || lower.includes("evening"))) {
+            times.push("08:00", "20:00");
+        } else if (lower.includes("morning")) {
+            times.push("08:00");
+        } else if (lower.includes("afternoon")) {
+            times.push("13:00");
+        } else if (lower.includes("evening")) {
+            times.push("18:00");
+        } else if (lower.includes("night") || lower.includes("bedtime")) {
+            times.push("20:00");
+        } else {
+            times.push("20:00");
+            meridiemAmbiguous = true;
+        }
+    }
+
+    // 4. Food timing
+    let foodTiming = "After Food";
+    if (lower.includes("before food") || lower.includes("before meal") || lower.includes("empty stomach")) {
+        foodTiming = "Before Food";
+    } else if (lower.includes("with food") || lower.includes("with meal")) {
+        foodTiming = "With Food";
+    } else if (lower.includes("anytime") || lower.includes("any time")) {
+        foodTiming = "Anytime";
+    }
+
+    // 5. Repeat daily
+    let repeatDaily = true;
+    if (lower.includes("once") || lower.includes("today only") || lower.includes("not daily") || lower.includes("single dose")) {
+        repeatDaily = false;
+    }
+
+    // 6. Name extraction & Fuzzy Medicine Matching: Bug 2(c)
+    let clean = normalised.replace(/^(?:please\s+)?(?:add|take|remind\s+me\s+to\s+take|i\s+need\s+to\s+take|put)\s+/i, "");
+    const nameMatch = clean.match(/^([a-zA-Z\s]+?)(?=\s+(?:\d+\s*(?:mg|g|ml|mcg|tablets?|capsules?|pills?|doses?|drop|drops)?|\d{1,2}(?::\d{2})?\s*(?:am|pm)?|at|stock|every|before|after|with|morning|afternoon|evening|night|daily|$))/i);
+    let rawName = nameMatch ? nameMatch[1].trim() : clean.split(/\s+(?:at|stock|\d)/i)[0].trim();
+
+    if (rawName.toLowerCase().startsWith("add ")) rawName = rawName.substring(4).trim();
+    if (rawName.toLowerCase().startsWith("take ")) rawName = rawName.substring(5).trim();
+
+    const name = matchCommonMedicine(rawName);
+    const isHighConfidence = name.length >= 2 && !["Medicine", "Pill", "Tablet", "Add", "Take"].includes(name);
+
+    return {
+        name: isHighConfidence ? name : "",
+        dosage,
+        times,
+        stock,
+        foodTiming,
+        repeatDaily,
+        meridiemAmbiguous,
+        isHighConfidence
+    };
+};
+
+window.showVoiceConfirmModal = function(parsed) {
+    return new Promise((resolve) => {
+        const modal = document.getElementById("voiceConfirmModal");
+        if (!modal) {
+            resolve(parsed);
+            return;
+        }
+
+        const nameInput = document.getElementById("voiceParsedName");
+        const dosageInput = document.getElementById("voiceParsedDosage");
+        const timeInput = document.getElementById("voiceParsedTime");
+        const meridiemSelect = document.getElementById("voiceParsedMeridiem");
+        const stockInput = document.getElementById("voiceParsedStock");
+        const stockHint = document.getElementById("voiceStockLabelHint");
+        const foodSelect = document.getElementById("voiceParsedFood");
+        const ambiguousWarning = document.getElementById("voiceAmbiguousWarning");
+        const saveBtn = document.getElementById("voiceSaveBtn");
+        const cancelBtn = document.getElementById("voiceCancelBtn");
+
+        // Clear previous error highlights
+        nameInput.classList.remove("input-highlight-error");
+        dosageInput.classList.remove("input-highlight-error");
+        stockInput.classList.remove("input-highlight-error");
+
+        nameInput.value = parsed.name || "";
+        if (!parsed.name) nameInput.classList.add("input-highlight-error");
+
+        dosageInput.value = parsed.dosage || "";
+        if (!parsed.dosage) dosageInput.classList.add("input-highlight-error");
+
+        // Time & AM/PM
+        let initialTime = (parsed.times && parsed.times[0]) ? parsed.times[0] : "20:00";
+        timeInput.value = initialTime;
+        const [h] = initialTime.split(":").map(Number);
+        meridiemSelect.value = (h >= 12) ? "PM" : "AM";
+
+        // Meridiem ambiguity warning
+        if (parsed.meridiemAmbiguous) {
+            ambiguousWarning.classList.remove("hidden");
+        } else {
+            ambiguousWarning.classList.add("hidden");
+        }
+
+        // Stock handling
+        if (parsed.stock !== null && parsed.stock !== undefined && !isNaN(parsed.stock)) {
+            stockInput.value = parsed.stock;
+            if (stockHint) {
+                stockHint.innerText = "(Spoken count)";
+                stockHint.style.color = "var(--text-secondary)";
+            }
+        } else {
+            stockInput.value = "";
+            stockInput.classList.add("input-highlight-error");
+            if (stockHint) {
+                stockHint.innerText = "(Missing from command - please enter)";
+                stockHint.style.color = "var(--danger-color)";
+            }
+        }
+
+        if (foodSelect) foodSelect.value = parsed.foodTiming || "After Food";
+
+        modal.classList.remove("hidden");
+
+        const cleanup = () => {
+            modal.classList.add("hidden");
+            saveBtn.onclick = null;
+            cancelBtn.onclick = null;
+        };
+
+        cancelBtn.onclick = () => {
+            cleanup();
+            resolve(null);
+        };
+
+        saveBtn.onclick = () => {
+            const finalName = nameInput.value.trim();
+            const finalDosage = dosageInput.value.trim();
+            const finalTime = timeInput.value;
+            const finalMeridiem = meridiemSelect.value;
+            const finalStockRaw = stockInput.value.trim();
+            const finalStock = finalStockRaw !== "" ? parseInt(finalStockRaw) : 0;
+            const finalFood = foodSelect ? foodSelect.value : "After Food";
+
+            if (!finalName) {
+                nameInput.classList.add("input-highlight-error");
+                nameInput.focus();
+                showToast("Medicine name is required.", "warning");
+                return;
+            }
+            if (!finalDosage) {
+                dosageInput.classList.add("input-highlight-error");
+                dosageInput.focus();
+                showToast("Dosage is required (e.g. 650 mg, 1 tablet).", "warning");
+                return;
+            }
+
+            // Adjust time to match meridiem selection if user toggled AM/PM
+            let [hrs, mins] = finalTime.split(":").map(Number);
+            if (finalMeridiem === "PM" && hrs < 12) hrs += 12;
+            if (finalMeridiem === "AM" && hrs >= 12) hrs -= 12;
+            const adjustedTimeStr = `${hrs.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}`;
+
+            cleanup();
+            resolve({
+                name: finalName,
+                dosage: finalDosage,
+                times: [adjustedTimeStr],
+                stock: finalStock,
+                foodTiming: finalFood,
+                repeatDaily: parsed.repeatDaily !== false
+            });
+        };
+    });
+};
+
+async function processVoiceCommand(cmd) {
+    const textEl = document.getElementById("voiceText");
+    if (textEl) textEl.innerText = cmd;
+
+    showPage("medicinePage");
+
+    let parsed = null;
+    const apiKey = localStorage.getItem("medicare_gemini_key");
+
+    // Bug 2(d): Send raw transcript to Gemini first when user has a Gemini key
+    if (apiKey) {
+        try {
+            showToast("Extracting medicine details with Gemini AI... 🤖", "info");
+            const systemPrompt = `You are a precision medical voice assistant. The user dictated a medicine reminder.
+IMPORTANT: Speech-to-text engines frequently mishear medicine names, dosages, and numbers (e.g. "add download 658 p.m." is a mishearing of "Add Dolo 650 at 8 PM", "croaking" for "Crocin", "parasitemol" for "Paracetamol").
+Infer the intended medicine name from common medications (Dolo, Crocin, Paracetamol, etc.), proper dosage (e.g. 650 mg), times in 24hr HH:MM format ("8 PM", "8 p.m.", "8 in the evening/night" MUST be "20:00". Only use AM when AM or morning is specified), and stock count if spoken ("stock 15", "15 tablets", "quantity 15", "15 pieces").
+Output ONLY valid JSON matching this exact structure:
+{"name": string, "dosage": string, "times": string[], "meridiemAmbiguous": boolean, "stock": number | null, "foodTiming": "Before Food" | "After Food" | "With Food" | "Anytime", "repeatDaily": boolean, "confidence": number}`;
+
+            const text = await window.callGemini(cmd, { systemInstruction: systemPrompt });
+            if (text) {
+                const cleanJson = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+                const aiParsed = JSON.parse(cleanJson);
+                if (aiParsed && aiParsed.name) {
+                    parsed = aiParsed;
+                }
+            }
+        } catch (err) {
+            console.warn("AI voice extraction fallback to local parser:", err);
+        }
+    }
+
+    // Fallback to local parser
+    if (!parsed || !parsed.name) {
+        parsed = window.parseVoiceLocally(cmd);
+    }
+
+    if (!parsed) {
+        parsed = { name: "", dosage: "", times: ["20:00"], stock: null, foodTiming: "After Food", repeatDaily: true, meridiemAmbiguous: true };
+    }
+
+    // Bug 2(e): Show editable confirmation modal
+    const confirmedMedicine = await window.showVoiceConfirmModal(parsed);
+    if (!confirmedMedicine) {
+        showToast("Voice medicine save cancelled.", "info");
+        return;
+    }
+
+    // Save directly to Firestore using confirmed fields
+    try {
+        const familySelect = document.getElementById("medicineFamilyMember");
+        const familyMemberId = familySelect ? familySelect.value : "";
+        const familyMemberName = familySelect && familySelect.selectedIndex >= 0 ? familySelect.options[familySelect.selectedIndex].text : "Self";
+
+        const primaryTime = confirmedMedicine.times[0] || "20:00";
+        const lowerName = confirmedMedicine.name.toLowerCase();
+        const dosage = confirmedMedicine.dosage;
+
+        // Duplicate detection with confirmation
+        const isDuplicate = medicines.some(m => {
+            const sameName = m.name.toLowerCase() === lowerName;
+            const sameMember = (m.familyMemberId || "") === familyMemberId;
+            const sameDose = (m.dosage || "").toLowerCase() === dosage.toLowerCase();
+            const sameTime = m.times && m.times.some(t => t.time === primaryTime);
+            return sameName && sameMember && sameDose && sameTime;
+        });
+
+        if (isDuplicate) {
+            const allowDup = await showConfirmModal(
+                "Duplicate Medicine Detected",
+                `A medicine "${confirmedMedicine.name}" (${dosage}) at ${primaryTime} already exists for ${familyMemberName}.\n\nDo you want to save another copy anyway?`
+            );
+            if (!allowDup) {
+                showToast("Cancelled saving duplicate medicine.", "info");
+                return;
+            }
+        }
+
+        // Check if scheduled time is earlier than current time today
+        const now = new Date();
+        const currentMins = now.getHours() * 60 + now.getMinutes();
+        const [h, m] = primaryTime.split(":").map(Number);
+        const doseMins = h * 60 + m;
+        const isScheduledForTomorrow = doseMins <= currentMins;
+
+        const times = confirmedMedicine.times.map(tStr => ({
+            time: tStr,
+            taken: false,
+            missed: false,
+            notified: false,
+            scheduledForTomorrow: isScheduledForTomorrow
+        }));
+
+        let nextDueAt = null;
+        const doseDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
+        if (doseDate.getTime() <= now.getTime()) {
+            doseDate.setDate(doseDate.getDate() + 1);
+        }
+        nextDueAt = doseDate;
+
+        const medicineData = {
+            name: confirmedMedicine.name,
+            dosage: confirmedMedicine.dosage,
+            category: "Tablet",
+            foodTiming: confirmedMedicine.foodTiming,
+            stock: confirmedMedicine.stock || 0,
+            expiryDate: "",
+            repeatDaily: confirmedMedicine.repeatDaily !== false,
+            times,
+            notes: "Added via Voice Assistant",
+            familyMemberId,
+            familyMemberName,
+            nextDueAt,
+            enabled: true,
+            createdAt: serverTimestamp()
+        };
+
+        await addDoc(collection(db, "users", currentUser.uid, "medicines"), medicineData);
+        resetMedicineForm();
+
+        if (isScheduledForTomorrow) {
+            showToast(`"${confirmedMedicine.name}" saved! Scheduled for tomorrow (next occurrence) since today's time has passed. ⏰`, "success", 6000);
+        } else {
+            showToast(`"${confirmedMedicine.name}" added successfully! ✅`, "success");
+        }
+    } catch (err) {
+        showToast("Error saving voice medicine: " + err.message, "danger");
+    }
+}
+
+// --------------------------------------------------------------------------
+// SECTION C: REMINDERS (In-App Checker, Web Audio, Spoken Reminders)
+// --------------------------------------------------------------------------
+function playReminderChime() {
+    try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return;
+        const ctx = new AudioCtx();
+        const now = ctx.currentTime;
+
+        const osc1 = ctx.createOscillator();
+        const gain1 = ctx.createGain();
+        osc1.type = "sine";
+        osc1.frequency.setValueAtTime(659.25, now); // E5
+        gain1.gain.setValueAtTime(0.3, now);
+        gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+        osc1.connect(gain1);
+        gain1.connect(ctx.destination);
+        osc1.start(now);
+        osc1.stop(now + 0.5);
+
+        const osc2 = ctx.createOscillator();
+        const gain2 = ctx.createGain();
+        osc2.type = "sine";
+        osc2.frequency.setValueAtTime(880.00, now + 0.25); // A5
+        gain2.gain.setValueAtTime(0.3, now + 0.25);
+        gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.85);
+        osc2.connect(gain2);
+        gain2.connect(ctx.destination);
+        osc2.start(now + 0.25);
+        osc2.stop(now + 0.85);
+    } catch (e) {
+        console.warn("Audio chime notice:", e);
+    }
+}
+
+const alertedDoseKeys = new Set();
+
+window.checkInAppReminders = async function () {
+    if (!currentUser || medicines.length === 0) return;
+    const now = new Date();
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Kolkata";
+    console.log(`[ReminderChecker] Checked ${medicines.length} medicines at ${now.toLocaleTimeString()} (${timeZone})`);
+
+    for (const med of medicines) {
+        if (!med.enabled || !med.times) continue;
+
+        for (let idx = 0; idx < med.times.length; idx++) {
+            const dose = med.times[idx];
+            if (dose.taken) continue;
+
+            const [h, m] = dose.time.split(":").map(Number);
+            const dueToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
+            const diffMs = now.getTime() - dueToday.getTime();
+            const key = `${med.id}_${idx}_${now.toISOString().substring(0, 10)}`;
+
+            if (diffMs >= 0 && diffMs <= 15 * 60 * 1000 && !alertedDoseKeys.has(key)) {
+                alertedDoseKeys.add(key);
+
+                playReminderChime();
+
+                const badge = document.getElementById("notificationBadge");
+                if (badge) {
+                    let count = parseInt(badge.innerText || "0") + 1;
+                    badge.innerText = count.toString();
+                    badge.classList.remove("hidden");
+                }
+
+                if ("Notification" in window && Notification.permission === "granted") {
+                    try {
+                        new Notification("💊 MediCare Medicine Reminder", {
+                            body: `Time to take ${med.name} (${med.dosage || '1 dose'}) for ${med.familyMemberName || 'Self'}.`,
+                            icon: "https://cdn-icons-png.flaticon.com/512/2966/2966489.png"
+                        });
+                    } catch (nErr) { console.warn("Browser notification notice:", nErr); }
+                }
+
+                addNotificationLog(`Reminder: ${med.name} (${med.dosage}) due at ${formatTime(dose.time)}.`);
+
+                // Spoken Reminder Announcement
+                const userName = currentUserData?.name || "Bhavya";
+                const medName = med.name;
+                const dosageName = med.dosage || "1 dose";
+
+                let spokenText = `${userName}, it is time to take ${medName}, ${dosageName}.`;
+
+                if (speechSettings.enabled && speechSettings.useAI && currentUser) {
+                    const apiKey = localStorage.getItem("medicare_gemini_key");
+                    if (apiKey) {
+                        try {
+                            const systemInstruction = `You are a helpful caregiver. Generate a short, warm, one-sentence spoken reminder for the patient to take their medicine. No emojis. Output only the exact sentence.`;
+                            const prompt = `Patient: ${userName}, Medicine: ${medName}, Dosage: ${dosageName}`;
+                            const phrase = await window.callGemini(prompt, { systemInstruction });
+                            if (phrase) spokenText = phrase.trim();
+                        } catch (aiErr) {
+                            console.warn("AI reminder phrase fallback notice:", aiErr);
+                        }
+                    }
+                }
+
+                // Speak immediately upon dose due dialog trigger
+                speakReminderText(spokenText);
+
+                // Setup 1-minute repeat once if not confirmed
+                clearSpeechRepeatTimer();
+                currentAlertedDoseKey = key;
+                repeatSpeechTimeout = setTimeout(() => {
+                    if (currentAlertedDoseKey === key && speechSettings.enabled) {
+                        speakReminderText(`Reminder: ${userName}, please take your ${medName}.`);
+                    }
+                    repeatSpeechTimeout = null;
+                    currentAlertedDoseKey = null;
+                }, 60000);
+
+                const choice = await showConfirmModal(
+                    "⏰ Medicine Dose Due!",
+                    `It is time to take ${med.name} (${med.dosage || '1 dose'}).\nScheduled: ${formatTime(dose.time)} for ${med.familyMemberName || 'Self'}.\n\nClick 'Confirm' to Mark Taken or 'Cancel' to Snooze 10m.`
+                );
+
+                clearSpeechRepeatTimer();
+
+                if (choice) {
+                    await markTaken(med.id, idx);
+                } else {
+                    await snoozeMedicine(med.id, idx);
+                }
+            } else if (diffMs > 15 * 60 * 1000 && !dose.missed && !dose.taken) {
+                console.log(`[ReminderChecker] Dose ${med.name} at ${dose.time} missed (>15m). Auto-marking missed.`);
+                await markMissedDose(med.id, idx);
+            }
+        }
+    }
+};
+
+window.enableRemindersAndNotifications = async function () {
+    const statusTextHeader = document.getElementById("notificationStatusText");
+    const statusTextPage = document.getElementById("healthPagePermStatus");
+    const helpBox = document.getElementById("notificationUnblockHelp");
+
+    if (!("Notification" in window)) {
+        showToast("Notifications are not supported by this browser.", "warning");
+        return;
+    }
+
+    const permission = await Notification.requestPermission();
+    console.log("[NotificationPermission] State:", permission);
+
+    if (statusTextHeader) statusTextHeader.innerText = permission === "granted" ? "Reminders Enabled ✅" : "Enable Reminders";
+    if (statusTextPage) statusTextPage.innerText = permission.toUpperCase();
+
+    if (permission === "granted") {
+        if (helpBox) helpBox.classList.add("hidden");
+        showToast("Notifications enabled successfully! 🎉", "success");
+        if (currentUser) initFCM(currentUser);
+    } else if (permission === "denied") {
+        if (helpBox) helpBox.classList.remove("hidden");
+        showToast("Notification permission was denied. Follow instructions below to unblock.", "danger", 6000);
+    } else {
+        showToast("Notification permission dismissed.", "info");
+    }
+};
+
+window.sendTestNotification = async function () {
+    if (!("Notification" in window)) {
+        showToast("Notifications not supported in this browser.", "warning");
+        return;
+    }
+
+    if (Notification.permission !== "granted") {
+        await enableRemindersAndNotifications();
+        if (Notification.permission !== "granted") return;
+    }
+
+    try {
+        new Notification("🧪 MediCare Test Notification", {
+            body: "Push notification system, Service Worker, and FCM integration are active!",
+            icon: "https://cdn-icons-png.flaticon.com/512/2966/2966489.png"
+        });
+        playReminderChime();
+        showToast("Test notification sent! Check your notifications.", "success");
+    } catch (e) {
+        showToast("Failed to send test notification: " + e.message, "danger");
+    }
+};
+
+window.clearNotificationHistory = async function () {
+    if (!currentUser) return;
+    const confirmClear = await showConfirmModal("Clear Notifications", "Clear all alert logs and notification history?");
+    if (!confirmClear) return;
+
+    try {
+        const historyRef = collection(db, "users", currentUser.uid, "history");
+        const snap = await getDocs(historyRef);
+        const batchPromises = snap.docs.map(dSnap => deleteDoc(doc(db, "users", currentUser.uid, "history", dSnap.id)));
+        await Promise.all(batchPromises);
+
+        document.getElementById("caregiverAlertList").innerHTML = `<p class="empty-text">No recent alerts or notifications.</p>`;
+        document.getElementById("notificationCenter").innerHTML = `<p class="empty-text">No recent notifications.</p>`;
+        showToast("Notification history cleared!", "info");
+    } catch (e) {
+        showToast("Error clearing notification history: " + e.message, "danger");
+    }
+};
+
+function addNotificationLog(message) {
+    const center = document.getElementById("notificationCenter");
+    if (!center) return;
+    if (center.querySelector(".empty-text")) center.innerHTML = "";
+    const div = document.createElement("div");
+    div.className = "alert-card";
+    div.innerHTML = `<p><b>🔔 Notification</b>: ${message}</p><small>${new Date().toLocaleTimeString()}</small>`;
+    center.prepend(div);
+}
+
+// Helper formatters
+function isMissed(timeStr) {
+    const [h, m] = timeStr.split(":").map(Number);
+    const now = new Date();
+    return (now.getHours() * 60 + now.getMinutes()) > (h * 60 + m + 30);
+}
+
+function formatTime(timeStr) {
+    const [h, m] = timeStr.split(":");
+    const d = new Date();
+    d.setHours(h, m);
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+setInterval(() => {
+    updateDashboardStats();
+    checkInAppReminders();
+}, 30000);

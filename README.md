@@ -1,102 +1,97 @@
-# 💊 MediCare - Smart Medicine Reminder & Health Assistant
+# 💊 MediCare – Smart Medicine Reminder & Health Assistant
 
-**MediCare** is a modern, responsive Progressive Web Application (PWA) designed to help patients, families, and caregivers track medication schedules, doctor appointments, health statistics, and emergency alerts. Connected with **Firebase Authentication**, **Cloud Firestore**, and **Google Gemini AI**, MediCare provides real-time adherence tracking and intelligent healthcare assistance.
-
----
-
-## ✨ Features
-
-- 🔐 **Firebase Authentication**: Secure email & password signup/login with persistent user sessions.
-- 🏠 **Interactive Dashboard**: Real-time progress bars, upcoming dose indicators, low stock alerts, and weekly adherence charts.
-- 👨‍👩‍👧 **Family Member Management**: Track medications and adherence statistics independently for parents, children, or elderly family members.
-- 💊 **Smart Medicine Management**:
-  - Multi-time daily dose scheduling with repeat options.
-  - One-click dose recording ("Mark Taken") and snooze functionality.
-  - Automatic low-stock warnings and easy refill prompts.
-  - Expiry date tracking (active warnings for expiring/expired medicines).
-- 🎤 **Voice Assistant**: Hands-free medicine input using natural speech (e.g., *"Add Dolo 650 at 8 PM stock 15"*).
-- 📅 **Doctor Appointments**: Schedule and receive timely alerts for upcoming consultations.
-- 🏥 **Doctor & Hospital Directory**: Save doctor contact numbers, specializations, and call directly from the app.
-- 🚨 **Emergency SOS & Caregiver Portal**:
-  - One-click Emergency SOS alert broadcasting to saved contacts.
-  - Unique **Caregiver Code** system allowing remote family members or nurses to monitor patient adherence and missed doses in real time.
-- 🩺 **Health Tools**:
-  - Hourly water reminder notifications.
-  - Built-in BMI Calculator with health status indicators.
-  - Prescription record archiving.
-- 🤖 **AI Health Assistant**: Integrated with Google Gemini AI to answer general health queries, medicine timing advice, and wellness tips based on the user's active prescriptions.
-- 📊 **Downloadable Health Reports**: Export comprehensive medical history, adherence charts, and doctor appointments as a clean, printable PDF report.
-- 🌙 **Dark Mode**: Smooth, eye-friendly dark theme with persistent preference saving.
-- 📱 **Progressive Web App (PWA)**: Fully installable on desktop and mobile devices with Service Worker offline caching.
+**MediCare** is a modern, responsive Progressive Web Application (PWA) designed to help patients, families, and caregivers track medication schedules, doctor appointments, health statistics, and emergency alerts. Powered by **Firebase Authentication**, **Cloud Firestore**, **Firebase Storage**, **Firebase Cloud Functions**, and **Google Gemini AI**.
 
 ---
 
-## 🚀 Setup & Configuration (Important before deploying!)
+## 🚀 Architectural Setup & Local Execution
 
-Before deploying this project to **GitHub Pages**, **Firebase Hosting**, or running locally, you must configure your API keys in `script.js`.
+### 1. Running the Frontend Locally
 
-### 1. Configure Firebase & Gemini API Keys
-Open `script.js` and locate lines 32–41:
+Since this app uses HTML, CSS, and ES Modules (`script.js`), it **must** be served via a local web server (browser security rules block ES module imports on direct `file://` access).
 
-```javascript
-const firebaseConfig = {
-    apiKey: "YOUR_FIREBASE_API_KEY",
-    authDomain: "your-app.firebaseapp.com",
-    projectId: "your-app-id",
-    storageBucket: "your-app.firebasestorage.app",
-    messagingSenderId: "1234567890",
-    appId: "1:1234567890:web:abcdef123456"
-};
+To run locally in your terminal:
 
-const GEMINI_API_KEY = "YOUR_GEMINI_API_KEY";
+```powershell
+npx serve .
 ```
 
-Replace `"YOUR_FIREBASE_API_KEY"` and the other Firebase configuration values with your actual project credentials from the [Firebase Console](https://console.firebase.google.com/).
-Replace `"YOUR_GEMINI_API_KEY"` with your Google AI Studio Gemini API key.
+*or with Python:*
+
+```powershell
+python -m http.server 8000
+```
+
+Open `http://localhost:3000` (or `http://localhost:8000`) in Google Chrome / modern web browser.
 
 ---
 
-## 🌐 How to Deploy on GitHub Pages
+## 🔑 Environment Variables & Secrets Setup
 
-This application is built with vanilla HTML, CSS, and ES Modules, making it 100% compatible with GitHub Pages without any build steps!
+> 🔒 **Security Requirement**: The Gemini API key is kept strictly **server-side only** inside Cloud Functions (`functions/index.js`). **NEVER** put the key in any client-side file.
 
-1. **Push your repository to GitHub**:
+### Local Development Setup (Firebase Emulator):
+1. Create a local secret file inside the `functions/` directory named `functions/.secret.local`:
    ```bash
-   git init
-   git add .
-   git commit -m "Initial commit - MediCare PWA"
-   git branch -M main
-   git remote add origin https://github.com/yourusername/your-repo-name.git
-   git push -u origin main
+   # functions/.secret.local
+   GEMINI_API_KEY=your_gemini_api_key_here
    ```
-2. **Enable GitHub Pages**:
-   - Go to your repository on GitHub → **Settings** → **Pages**.
-   - Under **Build and deployment** → **Source**, select `Deploy from a branch`.
-   - Choose the `main` branch and `/ (root)` folder, then click **Save**.
-3. **Visit your live PWA**:
-   - Within a couple of minutes, your site will be live at `https://yourusername.github.io/your-repo-name/`.
+   *(Note: `functions/.secret.local` is listed in `.gitignore` so your API key will never be committed to source control).*
+2. Start the Firebase Functions emulator:
+   ```bash
+   firebase emulators:start --only functions
+   ```
+3. When running on `localhost` or `127.0.0.1`, `script.js` automatically connects to the local emulator via `connectFunctionsEmulator(functions, "localhost", 5001)`.
 
-> **Note on Relative Paths**: All links and script imports in this project use relative paths (`./style.css`, `./script.js`, `./manifest.json`), ensuring seamless execution on GitHub Pages subdirectories!
+### Production Deployment Setup:
+1. Set the production secret in Firebase Secret Manager:
+   ```bash
+   firebase functions:secrets:set GEMINI_API_KEY
+   ```
+   *(Enter your Gemini API key when prompted).*
+2. Deploy functions to production:
+   ```bash
+   firebase deploy --only functions
+   ```
+
+
+## 🛡️ Firestore Security Rules & Patient Approval Flow
+
+Deploy the included `firestore.rules` file to restrict data access:
+
+- **User Isolation**: Users can read/write only their own documents and subcollections (`medicines`, `appointments`, `history`, `familyMembers`, `doctors`, `prescriptions`, `caregiverAlerts`, `caregiverRequests`, `authorizedCaregivers`).
+- **Patient Approval Caregiver Access**: Caregivers can read patient data ONLY if authorized by the patient (`authorizedCaregivers/{caregiverId}` with `status == "approved"`).
+- **Patient Approval Workflow**:
+  1. Patient shares caregiver code (`CG-ABC123`).
+  2. Caregiver requests link (`caregiverRequests/{caregiverId}`).
+  3. Patient approves request -> adds caregiver to `authorizedCaregivers` with `approved` status.
+
+To deploy rules:
+```bash
+firebase deploy --only firestore:rules
+```
 
 ---
 
-##  🔥 How to Deploy on Firebase Hosting
+## ☁️ Deploying Cloud Functions & Firebase Hosting
 
-If you prefer deploying via Firebase Hosting:
+### 1. Install Dependencies & Build Backend Functions:
+```bash
+cd functions
+npm install
+cd ..
+```
 
-1. Install the Firebase CLI:
-   ```bash
-   npm install -g firebase-tools
-   ```
-2. Login and initialize (if not already initialized):
-   ```bash
-   firebase login
-   firebase use default
-   ```
-3. Deploy to production:
-   ```bash
-   firebase deploy --only hosting
-   ```
+### 2. Deploy Everything to Production:
+```bash
+firebase deploy
+```
+
+*or deploy selectively:*
+```bash
+firebase deploy --only hosting
+firebase deploy --only functions
+```
 
 ---
 
@@ -109,5 +104,75 @@ If you prefer deploying via Firebase Hosting:
 
 ---
 
+## 📋 Comprehensive Testing Checklist
+
+### Phase 1: Reliability & Security
+- [x] **PWA Installability**: Install app icon directly from browser bar; offline shell cached via `sw.js`.
+- [x] **Firebase Cloud Messaging (FCM)**: Push notification permission request and foreground/background push dispatch for medicines and appointments with daily repeat support.
+- [x] **Emergency SOS**: Emergency SOS broadcast sends real-time alert document, triggers caregiver FCM push, and optional Twilio SMS fallback.
+- [x] **Gemini API Backend Proxy**: `askGemini` Cloud Function handles AI queries securely off the browser with key kept in environment secrets.
+- [x] **Firestore Security Rules & Patient Approval**: Strictly scoped rules requiring explicit patient approval before granting caregiver data access.
+
+### Phase 2: UI/UX Redesign
+- [x] **Authentication Tabs**: Separate Login and Sign Up tabs with primary buttons, loading state, show/hide password toggle, and friendly inline errors.
+- [x] **Non-blocking Toasts**: All `alert()` calls replaced with non-blocking toast notifications.
+- [x] **Dashboard Cards**: Circular SVG progress ring, Next dose countdown timer, adherence streak counter, low-stock warnings.
+- [x] **Navigation**: Fixed desktop sidebar with persistent logout, mobile bottom navigation tab bar.
+- [x] **Dark Mode**: Header theme toggle icon (☀️/🌙) with persistent preference saving in `localStorage` & user profile.
+- [x] **Accessible Forms & Modals**: Input labels, Relation dropdown, custom confirmation modal for delete/edit actions.
+- [x] **Empty States & Skeletons**: Empty state cards for all list views and skeleton pulse loaders.
+
+### Phase 3: Features
+- [x] **Medicines**: Dosage, food timing, frequency, notes, "Mark Taken / Skip / Snooze" actions, low-stock warnings.
+- [x] **Analytics**: Chart.js charts for weekly adherence trend and missed doses overview with per-family-member statistics.
+- [x] **AI Assistant**: Real-time chat interface with Firestore message history (`aiChats`), disclaimer banner, emergency query guardrails.
+- [x] **Health Tools**: BMI calculator with category badges (`Underweight`, `Normal`, `Overweight`, `Obese`), prescription image/PDF upload archive (Firebase Storage + base64 fallback), water intake reminder.
+- [x] **Health Report**: Clean printable / PDF export report window with complete patient medication profile.
+- [x] **Notification Center**: Past alerts log with date filters (All Time, Today, Past 7 Days).
+
+---
+
+## 💰 Google Cloud Budget Alert Recommendation
+
+To prevent unexpected billing spikes on the Firebase Blaze Plan when using Cloud Functions and Gemini API:
+
+1. Open the **[Google Cloud Billing Console](https://console.cloud.google.com/billing)**.
+2. Select **Budgets & alerts** -> **Create Budget**.
+3. Set a monthly target budget (e.g., `$5.00` or `$10.00`).
+4. Configure email alerts at **50%**, **80%**, and **100%** threshold triggers.
+
+---
+
+## 🛡️ Firebase App Check Setup (Optional Hardening)
+
+Firebase App Check protects your backend resources (Cloud Functions, Firestore, Storage) from abuse, unauthorized API calls, and scraping by verifying that incoming requests originate from your legitimate application.
+
+### Important Notice Before Enabling:
+> ⚠️ **What App Check Will Break if Enabled Without Provider Setup**: Enabling App Check in **Enforcement Mode** without proper token provider configuration will **block all local testing, development environments (`localhost`), and unauthorized browsers** from reaching Cloud Functions, Firestore, or Storage.
+
+### Setup Steps:
+1. **Register Provider**:
+   - In Firebase Console -> **App Check**, register your web app with **reCAPTCHA v3** (or reCAPTCHA Enterprise).
+2. **Client-Side Initialization**:
+   Add App Check initialization to `script.js` before `initializeApp`:
+   ```javascript
+   import { initializeAppCheck, ReCaptchaV3Provider } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-appcheck.js";
+
+   const appCheck = initializeAppCheck(app, {
+     provider: new ReCaptchaV3Provider('YOUR_RECAPTCHA_V3_SITE_KEY'),
+     isTokenAutoRefreshEnabled: true
+   });
+   ```
+3. **Local Testing**:
+   For local development, enable debug tokens in browser console:
+   ```javascript
+   self.FIREBASE_APPCHECK_EXECUTION_TIME = true;
+   ```
+   Add the generated debug token in Firebase Console under **App Check -> Apps -> Manage Debug Tokens**.
+>>>>>>> adb239b (Enhance MediCare application with Firebase backend, security rules, Cloud Functions, and test suites)
+
+---
+
 ## 📄 License
-This project is open-source and available under the MIT License. Made with ❤️ for better healthcare management.
+This project is open-source and available under the **MIT License**.
+
