@@ -71,7 +71,8 @@ service cloud.firestore {
       match /caregiverAlerts/{alertId} {
         allow read: if isOwner(userId) || isAuthorizedCaregiver(userId);
         allow create: if isOwner(userId);
-        allow update, delete: if isOwner(userId);
+        allow update: if isOwner(userId) || isAuthorizedCaregiver(userId);
+        allow delete: if isOwner(userId);
       }
 
       // Caregiver Requests Subcollection

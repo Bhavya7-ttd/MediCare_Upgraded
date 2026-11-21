@@ -98,6 +98,9 @@ let unsubscribeFamilyMembers = null;
 let unsubscribeCaregiverAlerts = null;
 let unsubscribeDoctors = null;
 let unsubscribeCaregiverViewAlerts = null;
+let unsubscribeLinkedPatients = null;
+let linkedPatientAlertUnsubscribers = {};
+let firstLoadPatientsMap = {};
 let unsubscribeAIChats = null;
 
 let viewedPatientId = null;
@@ -419,6 +422,12 @@ window.logout = async function () {
     if (unsubscribeAIChats) unsubscribeAIChats();
     if (unsubscribeCaregiverRequests) unsubscribeCaregiverRequests();
     if (unsubscribeAuthorizedCaregivers) unsubscribeAuthorizedCaregivers();
+    if (unsubscribeLinkedPatients) unsubscribeLinkedPatients();
+    Object.values(linkedPatientAlertUnsubscribers).forEach(unsub => {
+        if (typeof unsub === "function") unsub();
+    });
+    linkedPatientAlertUnsubscribers = {};
+    firstLoadPatientsMap = {};
 
     await signOut(auth);
     showToast("Logged out successfully.", "info");
@@ -1229,23 +1238,31 @@ window.triggerSOS = async function () {
                 <p>SMS Status: <b>${res.data?.smsStatus || "disabled"}</b></p>
             </div>
         `;
+        playSOSSiren();
         showToast("🚨 Emergency SOS Alert Triggered!", "danger", 6000);
     } catch (err) {
         // Fallback local Firestore write if Functions backend is offline
+        const emergencyPhone = document.getElementById("emergencyPhone")?.value || currentUserData?.emergencyContactPhone || "";
+        const emergencyName = currentUserData?.emergencyContactName || "Emergency Contact";
+
         await addDoc(collection(db, "users", currentUser.uid, "caregiverAlerts"), {
             patientId: currentUser.uid,
             patientName: currentUserData?.name || "Patient",
             type: "SOS",
-            message: "Emergency SOS triggered",
+            message: `🚨 Emergency SOS triggered by ${currentUserData?.name || "Patient"}`,
+            emergencyContactName: emergencyName,
+            emergencyContactPhone: emergencyPhone,
             status: "ACTIVE",
             createdAt: serverTimestamp()
         });
         statusBox.innerHTML = `
-            <div class="alert-card sos-alert">
-                <h3>🚨 SOS Alert Logged to Firestore</h3>
+            <div class="alert-card sos-alert sos-active">
+                <h3>🚨 SOS Alert Logged & Broadcast to Caregivers</h3>
+                <p>Status: <b>Active Alert Sent to Authorized Caregivers</b></p>
             </div>
         `;
-        showToast("SOS Alert saved to Firestore feed.", "warning");
+        playSOSSiren();
+        showToast("🚨 Emergency SOS Alert Triggered and Broadcast!", "danger", 6000);
     } finally {
         setTimeout(() => {
             sosSending = false;
@@ -1455,35 +1472,246 @@ window.confirmDeleteAccount = async function () {
     }
 };
 
+function playSOSSiren() {
+    try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return;
+        const ctx = new AudioCtx();
+        const now = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sawtooth";
+        osc.frequency.setValueAtTime(880, now);
+        osc.frequency.linearRampToValueAtTime(580, now + 0.25);
+        osc.frequency.linearRampToValueAtTime(880, now + 0.5);
+        osc.frequency.linearRampToValueAtTime(580, now + 0.75);
+        osc.frequency.linearRampToValueAtTime(880, now + 1.0);
+        gain.gain.setValueAtTime(0.35, now);
+        gain.gain.linearRampToValueAtTime(0.01, now + 1.25);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + 1.25);
+    } catch (e) {
+        console.warn("Audio siren notice:", e);
+    }
+}
+
 async function loadLinkedPatients() {
     const list = document.getElementById("linkedPatientsList");
     if (!list || !currentUser) return;
-    try {
-        const snap = await getDocs(collection(db, "users", currentUser.uid, "linkedPatients"));
+
+    if (unsubscribeLinkedPatients) {
+        unsubscribeLinkedPatients();
+        unsubscribeLinkedPatients = null;
+    }
+
+    const q = collection(db, "users", currentUser.uid, "linkedPatients");
+    unsubscribeLinkedPatients = onSnapshot(q, snap => {
         if (snap.empty) {
             list.innerHTML = `<p class="empty-text">No linked patients yet.</p>`;
             return;
         }
+
         list.innerHTML = "";
+        const currentPatientIds = new Set();
+
         snap.forEach(docSnap => {
             const p = docSnap.data();
-            list.innerHTML += `<button class="secondary-btn" style="width:auto;margin:4px;" onclick="viewPatient('${p.patientId}', '${p.patientName}')">👤 View ${p.patientName}</button>`;
+            const patientId = p.patientId;
+            const patientName = p.patientName || "Patient";
+            currentPatientIds.add(patientId);
+
+            list.innerHTML += `<button class="secondary-btn" style="width:auto;margin:4px;" onclick="viewPatient('${patientId}', '${patientName.replace(/'/g, "\\'")}')">👤 View ${patientName}</button>`;
+
+            // Attach realtime alert listener for this linked patient if not already listening
+            if (!linkedPatientAlertUnsubscribers[patientId]) {
+                listenToPatientAlerts(patientId, patientName);
+            }
         });
-    } catch (e) { console.error("Load linked patients error:", e); }
+
+        // Cleanup any removed patient listeners
+        Object.keys(linkedPatientAlertUnsubscribers).forEach(pid => {
+            if (!currentPatientIds.has(pid)) {
+                if (typeof linkedPatientAlertUnsubscribers[pid] === "function") {
+                    linkedPatientAlertUnsubscribers[pid]();
+                }
+                delete linkedPatientAlertUnsubscribers[pid];
+                delete firstLoadPatientsMap[pid];
+            }
+        });
+    }, err => {
+        console.warn("[loadLinkedPatients] Snapshot error:", err);
+    });
+}
+
+function listenToPatientAlerts(patientId, patientName) {
+    firstLoadPatientsMap[patientId] = true;
+    const q = query(collection(db, "users", patientId, "caregiverAlerts"), orderBy("createdAt", "desc"));
+
+    linkedPatientAlertUnsubscribers[patientId] = onSnapshot(q, snapshot => {
+        if (!firstLoadPatientsMap[patientId]) {
+            snapshot.docChanges().forEach(change => {
+                if (change.type === "added") {
+                    const alert = change.doc.data();
+                    if (alert.status === "ACTIVE") {
+                        if (alert.type === "SOS") {
+                            playSOSSiren();
+                            showToast(`🚨 EMERGENCY SOS from ${patientName}! Check immediately!`, "danger", 15000);
+                            if ("Notification" in window && Notification.permission === "granted") {
+                                try {
+                                    new Notification(`🚨 EMERGENCY SOS — ${patientName}`, {
+                                        body: alert.message || "Emergency SOS button pressed by patient!",
+                                        icon: "https://cdn-icons-png.flaticon.com/512/2966/2966489.png",
+                                        requireInteraction: true
+                                    });
+                                } catch (e) {}
+                            }
+                        } else if (alert.type === "MISSED_DOSE") {
+                            playReminderChime();
+                            showToast(`⚠️ Missed Dose — ${patientName}: ${alert.message}`, "warning", 8000);
+                        }
+                    }
+                }
+            });
+        }
+        firstLoadPatientsMap[patientId] = false;
+
+        // If this is the currently viewed patient in the UI, update the live feed
+        if (viewedPatientId === patientId) {
+            const alerts = [];
+            snapshot.forEach(docSnap => alerts.push({ id: docSnap.id, ...docSnap.data() }));
+            renderCaregiverViewAlerts(alerts, patientId, patientName);
+        }
+    }, err => {
+        console.warn(`[listenToPatientAlerts] Error listening to patient ${patientId}:`, err);
+    });
 }
 
 window.viewPatient = async function (patientId, name) {
+    viewedPatientId = patientId;
+    viewedPatientName = name;
+
     const container = document.getElementById("caregiverData");
-    container.innerHTML = `<div class="skeleton-card"></div>`;
+    const alertsFeed = document.getElementById("caregiverViewAlertList");
+    if (container) container.innerHTML = `<div class="skeleton-card">Loading patient medicines...</div>`;
+    if (alertsFeed) alertsFeed.innerHTML = `<div class="skeleton-card">Loading patient alerts...</div>`;
+
     try {
         const medsSnap = await getDocs(collection(db, "users", patientId, "medicines"));
         let html = `<h3>Patient Profile: ${name}</h3>`;
-        medsSnap.forEach(d => {
-            const m = d.data();
-            html += `<div class="medicine-card"><h3>${m.name}</h3><p>Category: ${m.category} | Stock: ${m.stock}</p></div>`;
-        });
-        container.innerHTML = html;
-    } catch (e) { container.innerHTML = `<p class="empty-text">Could not fetch patient details.</p>`; }
+        if (medsSnap.empty) {
+            html += `<p class="empty-text">No active medicines logged for this patient.</p>`;
+        } else {
+            medsSnap.forEach(d => {
+                const m = d.data();
+                html += `<div class="medicine-card"><h3>${m.name}</h3><p>Category: ${m.category} | Stock: ${m.stock}</p></div>`;
+            });
+        }
+        if (container) container.innerHTML = html;
+    } catch (e) {
+        if (container) container.innerHTML = `<p class="empty-text">Could not fetch patient details: ${e.message}</p>`;
+    }
+
+    // Now fetch and render alerts feed
+    try {
+        const alertsSnap = await getDocs(query(collection(db, "users", patientId, "caregiverAlerts"), orderBy("createdAt", "desc")));
+        const alerts = [];
+        alertsSnap.forEach(docSnap => alerts.push({ id: docSnap.id, ...docSnap.data() }));
+        renderCaregiverViewAlerts(alerts, patientId, name);
+    } catch (e) {
+        if (alertsFeed) alertsFeed.innerHTML = `<p class="empty-text">Could not fetch patient alerts: ${e.message}</p>`;
+    }
+};
+
+function alertStatusBadge(status) {
+    const s = (status || "ACTIVE").toUpperCase();
+    if (s === "ACTIVE") return `<span class="badge badge-danger" style="background:#fee2e2;color:#b91c1c;">🚨 ACTIVE</span>`;
+    if (s === "ACKNOWLEDGED") return `<span class="badge badge-warning" style="background:#fef3c7;color:#b45309;">✓ ACKNOWLEDGED</span>`;
+    return `<span class="badge badge-success" style="background:#dcfce7;color:#15803d;">RESOLVED</span>`;
+}
+
+function renderCaregiverViewAlerts(alerts, patientId, patientName) {
+    const list = document.getElementById("caregiverViewAlertList");
+    if (!list) return;
+
+    if (!alerts || alerts.length === 0) {
+        list.innerHTML = `<div class="medicine-card"><p class="empty-text" style="margin:0;">No alerts for ${patientName} yet.</p></div>`;
+        return;
+    }
+
+    let html = "";
+    alerts.forEach(a => {
+        const status = (a.status || "ACTIVE").toUpperCase();
+        const time = a.createdAt?.toDate ? a.createdAt.toDate().toLocaleString() : "Just now";
+
+        const ackButton = status === "ACTIVE"
+            ? `<button class="primary-btn" style="width:auto;padding:6px 14px;font-size:13px;background:var(--warning-color);" onclick="acknowledgeAlert('${patientId}','${a.id}')">Acknowledge Alert</button>`
+            : "";
+        const resolveButton = status === "ACKNOWLEDGED"
+            ? `<button class="primary-btn" style="width:auto;padding:6px 14px;font-size:13px;background:var(--success-color);" onclick="resolveAlert('${patientId}','${a.id}')">Mark Resolved</button>`
+            : "";
+
+        const callAction = a.emergencyContactPhone && a.emergencyContactPhone !== "Not set"
+            ? `<a href="tel:${a.emergencyContactPhone}" class="secondary-btn" style="width:auto;padding:6px 14px;font-size:13px;display:inline-block;text-decoration:none;margin-right:6px;">📞 Call ${a.emergencyContactPhone}</a>`
+            : "";
+
+        if (a.type === "SOS") {
+            html += `
+                <div class="alert-card sos-alert ${status === "ACTIVE" ? "sos-active" : ""}" style="margin-bottom:12px;border-left:5px solid var(--danger-color);padding:14px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <h3>🚨 EMERGENCY SOS</h3>
+                        ${alertStatusBadge(status)}
+                    </div>
+                    <p><b>Patient:</b> ${a.patientName || patientName}</p>
+                    <p><b>Time:</b> ${time}</p>
+                    <p style="margin:6px 0;">${a.message || "Emergency SOS triggered"}</p>
+                    ${a.emergencyContactPhone ? `<p style="font-size:13px;color:var(--text-secondary);"><b>Emergency Contact:</b> ${a.emergencyContactName || ""} (${a.emergencyContactPhone})</p>` : ""}
+                    <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+                        ${callAction}
+                        ${ackButton}
+                        ${resolveButton}
+                    </div>
+                </div>
+            `;
+        } else {
+            html += `
+                <div class="alert-card" style="margin-bottom:12px;padding:14px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <h3>⚠️ ${a.type === "MISSED_DOSE" ? "Missed Dose" : (a.message || "Alert")}</h3>
+                        ${alertStatusBadge(status)}
+                    </div>
+                    <p><b>Patient:</b> ${a.patientName || patientName}</p>
+                    <p><b>Time:</b> ${time}</p>
+                    <p style="margin:6px 0;">${a.message}</p>
+                    <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+                        ${ackButton}
+                        ${resolveButton}
+                    </div>
+                </div>
+            `;
+        }
+    });
+
+    list.innerHTML = html;
+}
+
+window.acknowledgeAlert = async function (patientId, alertId) {
+    try {
+        await updateDoc(doc(db, "users", patientId, "caregiverAlerts", alertId), { status: "ACKNOWLEDGED" });
+        showToast("Alert marked as acknowledged.", "success");
+    } catch (e) {
+        showToast("Could not acknowledge alert: " + e.message, "danger");
+    }
+};
+
+window.resolveAlert = async function (patientId, alertId) {
+    try {
+        await updateDoc(doc(db, "users", patientId, "caregiverAlerts", alertId), { status: "RESOLVED" });
+        showToast("Alert marked as resolved.", "info");
+    } catch (e) {
+        showToast("Could not resolve alert: " + e.message, "danger");
+    }
 };
 
 function listenCaregiverAlerts() {
@@ -3584,6 +3812,36 @@ window.checkInAppReminders = async function () {
                 await markMissedDose(med.id, idx);
             }
         }
+    }
+};
+
+window.markMissedDose = async function (medId, index) {
+    if (!currentUser) return;
+    const med = medicines.find(m => m.id === medId);
+    if (!med || !med.times || !med.times[index]) return;
+
+    med.times[index].missed = true;
+    med.times[index].taken = false;
+
+    try {
+        await updateDoc(doc(db, "users", currentUser.uid, "medicines", medId), { times: med.times });
+        await addDoc(collection(db, "users", currentUser.uid, "history"), {
+            medicineName: med.name,
+            time: med.times[index].time,
+            status: "Missed ❌",
+            createdAt: serverTimestamp()
+        });
+        await addDoc(collection(db, "users", currentUser.uid, "caregiverAlerts"), {
+            patientId: currentUser.uid,
+            patientName: currentUserData?.name || "Patient",
+            type: "MISSED_DOSE",
+            message: `${currentUserData?.name || "Patient"} missed ${med.name} at ${med.times[index].time}`,
+            status: "ACTIVE",
+            createdAt: serverTimestamp()
+        });
+        console.log(`[markMissedDose] Logged missed dose and alerted caregivers for ${med.name}`);
+    } catch (e) {
+        console.error("[markMissedDose] Error logging missed dose:", e);
     }
 };
 
