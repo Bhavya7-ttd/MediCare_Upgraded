@@ -466,7 +466,21 @@ window.regenerateCaregiverCode = async function () {
             showToast("New secure caregiver code generated! (Valid 24h)", "success");
         }
     } catch (e) {
-        showToast("Failed to regenerate code: " + e.message, "danger");
+        console.warn("[regenerateCaregiverCode] Cloud Function failed, generating client-side:", e);
+        try {
+            const newCode = generateCaregiverCode();
+            const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+            await updateDoc(doc(db, "users", currentUser.uid), {
+                caregiverCode: newCode,
+                caregiverCodeExpiresAt: expiresAt
+            });
+            currentUserData.caregiverCode = newCode;
+            document.getElementById("caregiverCodeText").innerText = newCode;
+            document.getElementById("myCaregiverCode").innerText = newCode;
+            showToast("New secure caregiver code generated! (Valid 24h)", "success");
+        } catch (fallbackErr) {
+            showToast("Failed to regenerate code: " + (fallbackErr.message || e.message), "danger");
+        }
     }
 };
 
@@ -1258,7 +1272,46 @@ window.requestPatientLink = async function () {
         showToast(res.data?.message || "Link request sent to patient! Awaiting approval.", "success");
         document.getElementById("caregiverSearchCode").value = "";
     } catch (err) {
-        showToast("Link request failed: " + err.message, "danger");
+        // Fallback to direct Firestore when Cloud Functions are not deployed or offline (e.g., Vercel deployment)
+        console.warn("[requestPatientLink] Cloud Function call failed, trying direct Firestore fallback:", err);
+        try {
+            const q = query(collection(db, "users"), where("caregiverCode", "==", code));
+            const snap = await getDocs(q);
+            if (snap.empty) {
+                showToast("Invalid or expired caregiver code.", "warning");
+                return;
+            }
+            const patientDoc = snap.docs[0];
+            const patientId = patientDoc.id;
+            const patientData = patientDoc.data();
+
+            if (patientId === currentUser.uid) {
+                showToast("You cannot request a link to your own patient profile.", "warning");
+                return;
+            }
+
+            if (patientData.caregiverCodeExpiresAt) {
+                const expMs = patientData.caregiverCodeExpiresAt.toMillis ? patientData.caregiverCodeExpiresAt.toMillis() : new Date(patientData.caregiverCodeExpiresAt).getTime();
+                if (Date.now() > expMs) {
+                    showToast("Caregiver code has expired. Ask patient to generate a new code.", "warning");
+                    return;
+                }
+            }
+
+            await setDoc(doc(db, "users", patientId, "caregiverRequests", currentUser.uid), {
+                caregiverId: currentUser.uid,
+                caregiverName: currentUserData?.name || currentUser.displayName || currentUser.email?.split("@")[0] || "Caregiver",
+                caregiverEmail: currentUser.email || "",
+                status: "pending",
+                requestedAt: serverTimestamp()
+            });
+
+            showToast("Link request sent to patient! Awaiting patient approval.", "success");
+            document.getElementById("caregiverSearchCode").value = "";
+        } catch (fallbackErr) {
+            console.error("[requestPatientLink] Direct Firestore fallback failed:", fallbackErr);
+            showToast("Link request failed: " + (fallbackErr.message || err.message), "danger");
+        }
     }
 };
 
@@ -1305,7 +1358,28 @@ window.approveCaregiverRequest = async function (caregiverId, caregiverName) {
         await approveCall({ caregiverId, caregiverName });
         showToast(`Approved ${caregiverName} as authorized caregiver!`, "success");
     } catch (err) {
-        showToast("Error approving request: " + err.message, "danger");
+        console.warn("[approveCaregiverRequest] Cloud Function failed, trying direct Firestore fallback:", err);
+        try {
+            await updateDoc(doc(db, "users", currentUser.uid, "caregiverRequests", caregiverId), {
+                status: "approved"
+            });
+            await setDoc(doc(db, "users", currentUser.uid, "authorizedCaregivers", caregiverId), {
+                caregiverId,
+                caregiverName: caregiverName || "Caregiver",
+                status: "approved",
+                approvedAt: serverTimestamp()
+            });
+            await setDoc(doc(db, "users", caregiverId, "linkedPatients", currentUser.uid), {
+                patientId: currentUser.uid,
+                patientName: currentUserData?.name || "Patient",
+                status: "approved",
+                linkedAt: serverTimestamp()
+            });
+            showToast(`Approved ${caregiverName} as authorized caregiver!`, "success");
+        } catch (fallbackErr) {
+            console.error("[approveCaregiverRequest] Direct Firestore fallback failed:", fallbackErr);
+            showToast("Error approving request: " + (fallbackErr.message || err.message), "danger");
+        }
     }
 };
 
@@ -1354,7 +1428,16 @@ window.revokeCaregiverAccess = async function (caregiverId) {
         const revokeCall = httpsCallable(functions, "revokeCaregiverAccess");
         await revokeCall({ caregiverId });
         showToast("Caregiver access revoked.", "info");
-    } catch (e) { showToast(e.message, "danger"); }
+    } catch (e) {
+        console.warn("[revokeCaregiverAccess] Cloud Function failed, trying direct Firestore fallback:", e);
+        try {
+            await deleteDoc(doc(db, "users", currentUser.uid, "authorizedCaregivers", caregiverId));
+            await deleteDoc(doc(db, "users", caregiverId, "linkedPatients", currentUser.uid));
+            showToast("Caregiver access revoked.", "info");
+        } catch (fallbackErr) {
+            showToast(e.message, "danger");
+        }
+    }
 };
 
 window.confirmDeleteAccount = async function () {
@@ -1562,6 +1645,8 @@ window.getAvailableGeminiModels = async function(apiKey) {
 };
 
 window.pickBestGeminiModel = function(models) {
+    if (!models || models.length === 0) return "";
+
     let getVer = (name) => {
         let match = name.match(/gemini-(\d+\.\d+)/);
         return match ? parseFloat(match[1]) : 0;
@@ -1573,7 +1658,7 @@ window.pickBestGeminiModel = function(models) {
 
     for (let m of models) {
         let n = m.name.toLowerCase();
-        if (n.includes("-preview") || n.includes("-image") || n.includes("-tts") || n.includes("-live") || n.includes("-embedding") || n.includes("-vision")) {
+        if (n.includes("-preview") || n.includes("-exp") || n.includes("-experimental") || n.includes("-image") || n.includes("-tts") || n.includes("-live") || n.includes("-embedding") || n.includes("-vision")) {
             others.push(m);
             continue;
         }
@@ -1689,13 +1774,13 @@ window.callGemini = async function(prompt, options = {}) {
 
         if (!response.ok) {
             const status = response.status;
-            // If 404, refresh model list once, switch to the next best model, retry once, and update the "Active Model" label in the UI
-            if (status === 404 && options.retryOn404 !== false) {
-                console.warn(`[callGemini] Model ${cleanModelName} returned 404. Refreshing model list and trying next best model...`);
+            // If 404 or >= 500 (e.g. 500, 503 service unavailable / overloaded), fallback to next best model
+            if ((status === 404 || status >= 500) && options.retryOnFailure !== false) {
+                console.warn(`[callGemini] Model ${cleanModelName} returned ${status}. Refreshing model list and trying next best model...`);
                 const nextModel = await window.getActiveModel(apiKey, true, cleanModelName);
                 if (nextModel && nextModel !== cleanModelName) {
-                    showToast(`Model ${cleanModelName.replace('models/', '')} not found. Switched to ${nextModel.replace('models/', '')}. Retrying...`, "info");
-                    return window.callGemini(prompt, { ...options, retryOn404: false });
+                    showToast(`Model ${cleanModelName.replace('models/', '')} unavailable (${status}). Switched to ${nextModel.replace('models/', '')}. Retrying...`, "info");
+                    return window.callGemini(prompt, { ...options, retryOnFailure: false, excludeModel: cleanModelName });
                 }
             }
             if (status === 400 || status === 403) throw new Error("Invalid key or API disabled.");
@@ -1743,14 +1828,52 @@ window.testGeminiKey = async function() {
             localStorage.setItem("medicare_gemini_key", key);
         }
 
-        const best = window.pickBestGeminiModel(models);
-        localStorage.setItem("medicare_gemini_model", best);
-        localStorage.setItem("medicare_gemini_model_time", Date.now().toString());
-
         await window.populateModelDropdown(key);
 
-        // Verify key by calling Gemini via callGemini
-        await window.callGemini("Respond with 'OK' if working.", { apiKey: key });
+        // Test models in candidate order with automatic fallback on 5xx or 404
+        let candidateModels = [...models];
+        let workingModel = null;
+        let lastError = null;
+
+        while (candidateModels.length > 0) {
+            const candidate = window.pickBestGeminiModel(candidateModels);
+            if (!candidate) break;
+
+            try {
+                let cleanCandidate = candidate.startsWith("models/") ? candidate : `models/${candidate}`;
+                const testUrl = `https://generativelanguage.googleapis.com/v1beta/${cleanCandidate}:generateContent`;
+                const testRes = await fetch(testUrl, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+                    body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "ping" }] }] })
+                });
+
+                if (testRes.ok) {
+                    workingModel = candidate;
+                    break;
+                } else if (testRes.status === 400 || testRes.status === 403) {
+                    throw new Error("Invalid key or API disabled.");
+                } else if (testRes.status === 429) {
+                    throw new Error("Quota or rate limit exceeded. Please wait a minute.");
+                } else {
+                    console.warn(`[testGeminiKey] Candidate model ${candidate} returned ${testRes.status}. Trying next available model...`);
+                    candidateModels = candidateModels.filter(m => m.name !== candidate);
+                }
+            } catch (candErr) {
+                if (candErr.message.includes("Invalid key") || candErr.message.includes("API disabled") || candErr.message.includes("Quota")) {
+                    throw candErr;
+                }
+                candidateModels = candidateModels.filter(m => m.name !== candidate);
+                lastError = candErr;
+            }
+        }
+
+        if (!workingModel) {
+            throw new Error(lastError?.message || "Gemini network service down. Please try later.");
+        }
+
+        localStorage.setItem("medicare_gemini_model", workingModel);
+        localStorage.setItem("medicare_gemini_model_time", Date.now().toString());
 
         if (statusEl) {
             statusEl.innerText = `Status: Key valid! Found ${models.length} usable models. ✅`;
@@ -1758,9 +1881,9 @@ window.testGeminiKey = async function() {
         }
         const activeText = document.getElementById("geminiActiveModelText");
         if (activeText) {
-            activeText.innerText = `Active Model: ${best.replace('models/', '')}`;
+            activeText.innerText = `Active Model: ${workingModel.replace('models/', '')}`;
         }
-        showToast(`API Key valid. Active model: ${best.replace('models/', '')}`, "success");
+        showToast(`API Key valid. Active model: ${workingModel.replace('models/', '')}`, "success");
     } catch(e) {
         if (statusEl) {
             statusEl.innerText = "Status: Key test failed. ❌";
