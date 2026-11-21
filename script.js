@@ -575,10 +575,34 @@ function loadTheme() {
     }
 }
 
+window.toggleMobileSidebar = function (forceState) {
+    const sidebar = document.querySelector(".sidebar");
+    const overlay = document.getElementById("sidebarOverlay");
+    if (!sidebar) return;
+
+    const isOpen = sidebar.classList.contains("mobile-open");
+    const nextState = typeof forceState === "boolean" ? forceState : !isOpen;
+
+    if (nextState) {
+        sidebar.classList.add("mobile-open");
+        if (overlay) overlay.classList.add("active");
+        document.body.style.overflow = "hidden";
+    } else {
+        sidebar.classList.remove("mobile-open");
+        if (overlay) overlay.classList.remove("active");
+        document.body.style.overflow = "";
+    }
+};
+
 window.showPage = function (pageId) {
     try {
+        if (typeof window.toggleMobileSidebar === "function") {
+            window.toggleMobileSidebar(false);
+        }
+
         document.querySelectorAll(".page-section").forEach(p => p.classList.add("hidden"));
         document.querySelectorAll(".nav-item").forEach(item => item.classList.remove("active"));
+        document.querySelectorAll(".mobile-tab-bar button").forEach(item => item.classList.remove("active"));
 
         const activePage = document.getElementById(pageId);
         if (activePage) {
@@ -589,6 +613,9 @@ window.showPage = function (pageId) {
 
         const activeNav = document.getElementById(`nav-${pageId}`);
         if (activeNav) activeNav.classList.add("active");
+
+        const activeTab = document.getElementById(`tab-${pageId}`);
+        if (activeTab) activeTab.classList.add("active");
 
         if (pageId === "dashboardPage") {
             updateDashboardStats();

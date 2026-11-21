@@ -152,13 +152,14 @@
 <div id="appPage" class="app hidden" inert aria-hidden="true">
 
     <!-- Desktop Sidebar Navigation -->
-    <aside class="sidebar">
+    <aside class="sidebar" id="appSidebar">
         <div class="sidebar-header">
             <div class="logo">
                 <span class="logo-icon">💊</span>
                 <span class="logo-text">MediCare</span>
             </div>
             <span class="logo-badge">Plus</span>
+            <button class="mobile-close-sidebar-btn" onclick="toggleMobileSidebar(false)" aria-label="Close Menu" title="Close">✕</button>
         </div>
 
         <nav class="sidebar-nav">
@@ -219,13 +220,15 @@
             </button>
         </div>
     </aside>
+    <div id="sidebarOverlay" class="sidebar-overlay" onclick="toggleMobileSidebar(false)"></div>
 
     <!-- Main Content Body -->
     <main class="main-content">
 
         <!-- Header Bar -->
         <header class="top-header">
-            <div class="user-greeting">
+            <div class="user-greeting" style="display:flex;align-items:center;gap:12px;">
+                <button class="mobile-menu-btn" id="mobileHeaderMenuBtn" onclick="toggleMobileSidebar(true)" aria-label="Open Navigation Menu" title="Menu">☰</button>
                 <h2 id="headerWelcomeText">👋 Welcome Back</h2>
             </div>
             <div class="header-actions">
@@ -865,11 +868,11 @@
 
     <!-- Mobile Bottom Tab Bar -->
     <nav class="mobile-tab-bar">
-        <button onclick="showPage('dashboardPage')" title="Dashboard">🏠<span>Dashboard</span></button>
-        <button onclick="showPage('medicinePage')" title="Medicines">💊<span>Medicines</span></button>
-        <button onclick="showPage('caregiverPage')" title="SOS">🚨<span>SOS</span></button>
-        <button onclick="showPage('aiPage')" title="AI">🤖<span>AI</span></button>
-        <button onclick="showPage('historyPage')" title="History">📜<span>History</span></button>
+        <button id="tab-dashboardPage" class="active" onclick="showPage('dashboardPage')" title="Dashboard">🏠<span>Dashboard</span></button>
+        <button id="tab-familyPage" onclick="showPage('familyPage')" title="Family">👨‍👩‍👧<span>Family</span></button>
+        <button id="tab-medicinePage" onclick="showPage('medicinePage')" title="Medicines">💊<span>Medicines</span></button>
+        <button id="tab-caregiverPage" onclick="showPage('caregiverPage')" title="SOS">🚨<span>SOS</span></button>
+        <button id="tab-menuBtn" onclick="toggleMobileSidebar()" title="More Sections">☰<span>Menu</span></button>
     </nav>
 </div>
 
